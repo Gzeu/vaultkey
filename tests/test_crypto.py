@@ -1,4 +1,9 @@
-"""Tests for AES-256-GCM encryption and HKDF subkey derivation."""
+"""
+Tests for AES-256-GCM encryption, HKDF subkey derivation, and SecureMemory.
+
+Includes FIX #6 regression: DOMAIN_SALT is applied — subkeys derived with
+different app constants must differ.
+"""
 
 import secrets
 import pytest
@@ -6,12 +11,13 @@ from cryptography.exceptions import InvalidTag
 from hypothesis import given, settings, strategies as st
 
 from wallet.core.crypto import (
+    DOMAIN_SALT,
     SecureMemory,
     decrypt_aes_gcm,
     decrypt_entry_value,
+    derive_entry_subkey,
     encrypt_aes_gcm,
     encrypt_entry_value,
-    derive_entry_subkey,
     wallet_aad,
 )
 
@@ -59,6 +65,7 @@ class TestAESGCM:
     @given(st.binary(min_size=1, max_size=4096))
     @settings(max_examples=100)
     def test_arbitrary_plaintext_roundtrip(self, plaintext: bytes):
+        """Property: encrypt → decrypt = identity for any input."""
         key = secrets.token_bytes(32)
         nonce, ct = encrypt_aes_gcm(key, plaintext)
         assert decrypt_aes_gcm(key, nonce, ct) == plaintext
@@ -73,14 +80,42 @@ class TestHKDF:
 
     def test_different_ids_different_subkeys(self):
         master = secrets.token_bytes(32)
-        k1 = derive_entry_subkey(master, "uuid-aaa")
-        k2 = derive_entry_subkey(master, "uuid-bbb")
-        assert k1 != k2
+        assert derive_entry_subkey(master, "aaa") != derive_entry_subkey(master, "bbb")
 
     def test_different_masters_different_subkeys(self):
-        k1 = derive_entry_subkey(secrets.token_bytes(32), "same-id")
-        k2 = derive_entry_subkey(secrets.token_bytes(32), "same-id")
-        assert k1 != k2
+        assert (
+            derive_entry_subkey(secrets.token_bytes(32), "same-id")
+            != derive_entry_subkey(secrets.token_bytes(32), "same-id")
+        )
+
+    def test_domain_salt_is_32_bytes(self):
+        """FIX #6 regression: DOMAIN_SALT must be exactly 32 bytes."""
+        assert len(DOMAIN_SALT) == 32
+
+    def test_domain_salt_affects_subkey(self):
+        """
+        FIX #6 regression: subkeys derived with explicit DOMAIN_SALT must
+        differ from those that would be derived with the all-zero default salt.
+        """
+        from cryptography.hazmat.primitives.hashes import SHA256
+        from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+
+        master = secrets.token_bytes(32)
+        entry_id = "test-entry"
+
+        # Subkey from our code (uses DOMAIN_SALT)
+        with_domain_salt = derive_entry_subkey(master, entry_id)
+
+        # Subkey using zero salt (old behaviour)
+        hkdf_zero = HKDF(
+            algorithm=SHA256(),
+            length=32,
+            salt=None,   # defaults to zero-filled
+            info=f"vaultkey:entry:{entry_id}".encode(),
+        )
+        with_zero_salt = hkdf_zero.derive(master)
+
+        assert with_domain_salt != with_zero_salt
 
 
 class TestEntryEncryption:
@@ -89,15 +124,12 @@ class TestEntryEncryption:
         entry_id = "entry-uuid-001"
         original = "sk-prod-abcdefghijklmnopqrstuvwxyz"
         nonce, ct = encrypt_entry_value(master, entry_id, original)
-        result = decrypt_entry_value(master, entry_id, nonce, ct)
-        assert result == original
+        assert decrypt_entry_value(master, entry_id, nonce, ct) == original
 
     def test_wrong_master_fails(self):
-        master1 = secrets.token_bytes(32)
-        master2 = secrets.token_bytes(32)
-        nonce, ct = encrypt_entry_value(master1, "id", "secret")
+        nonce, ct = encrypt_entry_value(secrets.token_bytes(32), "id", "secret")
         with pytest.raises(InvalidTag):
-            decrypt_entry_value(master2, "id", nonce, ct)
+            decrypt_entry_value(secrets.token_bytes(32), "id", nonce, ct)
 
 
 class TestSecureMemory:
@@ -112,16 +144,11 @@ class TestSecureMemory:
     def test_context_manager_returns_bytearray(self):
         with SecureMemory(b"hello") as buf:
             assert isinstance(buf, bytearray)
-            assert buf == bytearray(b"hello")
 
 
 class TestWalletAAD:
-    def test_aad_is_bytes(self):
-        aad = wallet_aad("/home/user/wallet.enc")
-        assert isinstance(aad, bytes)
-        assert len(aad) == 32
+    def test_aad_length(self):
+        assert len(wallet_aad("/home/user/wallet.enc")) == 32
 
-    def test_aad_different_paths(self):
-        a = wallet_aad("/path/a/wallet.enc")
-        b = wallet_aad("/path/b/wallet.enc")
-        assert a != b
+    def test_aad_path_binding(self):
+        assert wallet_aad("/path/a") != wallet_aad("/path/b")

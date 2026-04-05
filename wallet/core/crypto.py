@@ -2,29 +2,40 @@
 crypto.py — AES-256-GCM encryption/decryption and HKDF subkey derivation.
 
 Design decisions:
-- AES-256-GCM is chosen over Fernet because it provides authenticated encryption
-  with associated data (AEAD), explicit nonce control, and is a NIST standard.
-  Fernet uses AES-128-CBC + HMAC which is older and less flexible.
-- Each API key entry is encrypted with a unique subkey derived via HKDF from the
-  master key and the entry's UUID — this is defense-in-depth (double encryption).
+- AES-256-GCM is chosen over Fernet because it provides AEAD, explicit nonce
+  control, and is a NIST standard. Fernet uses AES-128-CBC+HMAC (older, less flexible).
+- Each API key entry is encrypted with a unique subkey derived via HKDF-SHA256
+  from the master key and the entry's UUID — defense-in-depth (double encryption).
 - Nonces are always generated with secrets.token_bytes(12) — never reused.
-- SecureMemory context manager uses ctypes.memset to zero memory on exit,
-  bypassing Python's GC which does not guarantee timely memory cleanup.
+- SecureMemory context manager uses ctypes.memset to zero memory on exit.
+
+FIX #6 (MINOR) v1.1 — HKDF explicit salt:
+  RFC 5869 §3.1 recommends providing an explicit salt for domain separation.
+  Previously HKDF was called with salt=None (uses a zero-filled default).
+  Now: salt = DOMAIN_SALT — a fixed, public, non-secret 32-byte application
+  constant that binds subkey derivation to this specific application.
+  This prevents subkeys derived here from being confused with subkeys from
+  other applications that also use HKDF-SHA256 with the same master key.
+  The salt is NOT secret and does NOT need to be stored — it's a constant.
 """
 
 import ctypes
 import hashlib
 import secrets
-from contextlib import contextmanager
 from typing import Generator
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.hashes import SHA256
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
-NONCE_SIZE = 12   # bytes — GCM standard
-KEY_SIZE = 32     # bytes — AES-256
-TAG_SIZE = 16     # bytes — GCM authentication tag (implicit in AESGCM)
+NONCE_SIZE = 12    # bytes — GCM standard
+KEY_SIZE = 32      # bytes — AES-256
+TAG_SIZE = 16      # bytes — GCM authentication tag (implicit in AESGCM)
+
+# FIX #6: Explicit HKDF domain-separation salt (RFC 5869 §3.1).
+# Public constant — not secret, not stored. Derived from the app name via SHA-256
+# so it's deterministic, collision-resistant, and 32 bytes exactly.
+DOMAIN_SALT: bytes = hashlib.sha256(b"vaultkey-v1-hkdf-domain-salt-2024").digest()
 
 
 class SecureMemory:
@@ -33,7 +44,7 @@ class SecureMemory:
     Use for any in-memory sensitive data (derived keys, plaintext API keys).
     """
 
-    def __init__(self, data: bytes | bytearray):
+    def __init__(self, data: bytes | bytearray) -> None:
         self._buf = bytearray(data)
 
     def __enter__(self) -> bytearray:
@@ -48,7 +59,7 @@ class SecureMemory:
                 (ctypes.c_char * len(self._buf)).from_buffer(self._buf)
             )
             ctypes.memset(addr, 0, len(self._buf))
-            self._buf[:] = bytearray(len(self._buf))  # Python-level overwrite too
+            self._buf[:] = bytearray(len(self._buf))
 
     @property
     def value(self) -> bytes:
@@ -66,12 +77,12 @@ def encrypt_aes_gcm(
     Args:
         key:       32-byte encryption key.
         plaintext: Raw bytes to encrypt.
-        aad:       Optional Associated Authenticated Data (not encrypted, but authenticated).
+        aad:       Optional Associated Authenticated Data.
 
     Returns:
-        (nonce, ciphertext_with_tag) — both needed for decryption.
+        (nonce, ciphertext_with_tag)
     """
-    assert len(key) == KEY_SIZE, f"Key must be {KEY_SIZE} bytes"
+    assert len(key) == KEY_SIZE, f"Key must be {KEY_SIZE} bytes, got {len(key)}"
     nonce = secrets.token_bytes(NONCE_SIZE)
     aesgcm = AESGCM(key)
     ciphertext = aesgcm.encrypt(nonce, plaintext, aad)
@@ -85,8 +96,8 @@ def decrypt_aes_gcm(
     aad: bytes | None = None,
 ) -> bytes:
     """
-    Decrypt AES-256-GCM ciphertext. Raises cryptography.exceptions.InvalidTag
-    if the key is wrong, the nonce is wrong, or the ciphertext was tampered with.
+    Decrypt AES-256-GCM ciphertext.
+    Raises cryptography.exceptions.InvalidTag on any authentication failure.
     """
     aesgcm = AESGCM(key)
     return aesgcm.decrypt(nonce, ciphertext, aad)
@@ -97,17 +108,18 @@ def derive_entry_subkey(master_key: bytes, entry_id: str) -> bytes:
     Derive a per-entry subkey using HKDF-SHA256.
 
     Each API key entry is encrypted with its own unique subkey derived from:
-    - master_key: the wallet's AES-256 key (from Argon2id)
-    - entry_id:   the UUID of the entry (used as HKDF 'info')
+    - master_key:  the wallet's AES-256 key (from Argon2id)
+    - DOMAIN_SALT: fixed app constant for domain separation (FIX #6)
+    - info:        entry-specific context string
 
-    This means even if one entry's subkey is somehow compromised, other entries
-    remain secure (defense-in-depth / key separation).
+    This means even if one entry's subkey were somehow compromised, all other
+    entries remain secure (key separation / defense-in-depth).
     """
     hkdf = HKDF(
         algorithm=SHA256(),
         length=KEY_SIZE,
-        salt=None,
-        info=f"api_key:{entry_id}".encode(),
+        salt=DOMAIN_SALT,           # FIX #6: was None (zero-salt default)
+        info=f"vaultkey:entry:{entry_id}".encode(),
     )
     return hkdf.derive(master_key)
 
@@ -115,21 +127,23 @@ def derive_entry_subkey(master_key: bytes, entry_id: str) -> bytes:
 def wallet_aad(wallet_path: str) -> bytes:
     """
     Compute Associated Authenticated Data from the wallet file path.
-
-    Binding the AAD to the file path prevents an attacker from copying
-    wallet.enc to a different location and decrypting it there (context binding).
+    Binding AAD to the file path prevents relocation attacks.
     """
     return hashlib.sha256(wallet_path.encode()).digest()
 
 
-def encrypt_entry_value(master_key: bytes, entry_id: str, api_key_value: str) -> tuple[bytes, bytes]:
+def encrypt_entry_value(
+    master_key: bytes, entry_id: str, api_key_value: str
+) -> tuple[bytes, bytes]:
     """Encrypt a single API key value using its unique per-entry subkey."""
     subkey = derive_entry_subkey(master_key, entry_id)
     with SecureMemory(subkey) as sk:
         return encrypt_aes_gcm(bytes(sk), api_key_value.encode())
 
 
-def decrypt_entry_value(master_key: bytes, entry_id: str, nonce: bytes, ciphertext: bytes) -> str:
+def decrypt_entry_value(
+    master_key: bytes, entry_id: str, nonce: bytes, ciphertext: bytes
+) -> str:
     """Decrypt a single API key value using its unique per-entry subkey."""
     subkey = derive_entry_subkey(master_key, entry_id)
     with SecureMemory(subkey) as sk:

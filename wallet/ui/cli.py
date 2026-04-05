@@ -4,28 +4,53 @@ cli.py — Typer-based CLI for VaultKey.
 All commands require an unlocked session except: init, unlock, status.
 Sensitive input (master password, API key value) is always prompted with
 echo=False to prevent terminal display and shell history leakage.
+
+FIXES v1.1:
+  FIX #2 (CRITIC): add() now generates the entry UUID BEFORE first encrypt.
+    Previously: encrypted with '_tmp_' subkey first, then re-encrypted with
+    the real UUID — wasted a HKDF derivation + left a short-lived wrong
+    ciphertext in memory. Now: UUID generated upfront, single encrypt call.
+
+  FIX #4 (MODERATE): 'from datetime import datetime, timezone' consolidated
+    at module level. Previously imported 3× (module-level + inside get + rotate).
 """
 
-import sys
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
+import json
 
 import typer
+from rich import box
 from rich.console import Console
 from rich.panel import Panel
+from rich.prompt import Confirm, Prompt
 from rich.table import Table
-from rich import box
-from rich.prompt import Prompt, Confirm
 
-from wallet.core.crypto import encrypt_entry_value, decrypt_entry_value
-from wallet.core.kdf import KDFParams, derive_key, hash_master_password, verify_master_password
-from wallet.core.session import SessionManager, WalletLockedException, TooManyAttemptsException
-from wallet.core.storage import WalletStorage, WalletCorruptError
+from wallet.core.crypto import decrypt_entry_value, encrypt_entry_value
+from wallet.core.kdf import (
+    KDFParams,
+    derive_key,
+    hash_master_password,
+    verify_master_password,
+)
+from wallet.core.session import (
+    SessionManager,
+    TooManyAttemptsException,
+    WalletLockedException,
+)
+from wallet.core.storage import WalletCorruptError, WalletStorage
 from wallet.models.config import WalletConfig
 from wallet.models.wallet import APIKeyEntry, WalletPayload
 from wallet.utils.audit import audit_log
 from wallet.utils.clipboard import copy_to_clipboard
 from wallet.utils.prefix_detect import detect_service, mask_key
-from wallet.utils.validators import parse_expiry_date, validate_api_key_value, validate_key_name
+from wallet.utils.validators import (
+    parse_expiry_date,
+    validate_api_key_value,
+    validate_key_name,
+)
 
 app = typer.Typer(
     name="wallet",
@@ -80,7 +105,7 @@ def _status_color(label: str) -> str:
 # ------------------------------------------------------------------ #
 
 @app.command()
-def init():
+def init() -> None:
     """Initialize a new wallet. Sets master password and creates wallet.enc."""
     if storage.exists():
         if not Confirm.ask("[yellow]Wallet already exists. Overwrite?[/yellow]"):
@@ -107,7 +132,7 @@ def init():
 
 
 @app.command()
-def unlock():
+def unlock() -> None:
     """Unlock the wallet. Loads master password and derives session key."""
     if not storage.exists():
         console.print("[red]❌ No wallet found. Run: wallet init[/red]")
@@ -130,18 +155,21 @@ def unlock():
         raise typer.Exit(1)
 
     session.unlock(key)
-    console.print(f"[green]✓ Wallet unlocked.[/green] [dim]Auto-locks in {cfg.session_timeout_minutes} minutes.[/dim]")
+    console.print(
+        f"[green]✓ Wallet unlocked.[/green] "
+        f"[dim]Auto-locks in {cfg.session_timeout_minutes} minutes.[/dim]"
+    )
 
 
 @app.command()
-def lock():
+def lock() -> None:
     """Lock the wallet and clear the session key from memory."""
     session.lock()
     console.print("[green]🔒 Wallet locked.[/green]")
 
 
 @app.command()
-def status():
+def status() -> None:
     """Show wallet status, session info, and key count."""
     info = session.info
     if info["unlocked"]:
@@ -155,7 +183,7 @@ def status():
             f"Unlocked at: {info['unlocked_at']}\n"
             f"Last activity: {info['last_activity']}\n"
             f"Timeout: {info['timeout_minutes']} min",
-            title="VaultKey Status", expand=False
+            title="VaultKey Status", expand=False,
         ))
     else:
         console.print(Panel("[red]🔒 Locked[/red]", title="VaultKey Status", expand=False))
@@ -168,7 +196,7 @@ def add(
     tags: Optional[str] = typer.Option(None, "--tags", "-t", help="Comma-separated"),
     description: Optional[str] = typer.Option(None, "--description", "-d"),
     expires: Optional[str] = typer.Option(None, "--expires", "-e", help="YYYY-MM-DD"),
-):
+) -> None:
     """Add a new API key to the wallet."""
     key = _require_unlocked()
     payload = _load_payload(key)
@@ -181,11 +209,22 @@ def add(
     raw_value = validate_api_key_value(raw_value)
 
     svc_info = detect_service(raw_value)
-    service = service or (svc_info.service_id if svc_info else Prompt.ask("Service name"))
-    prefix = raw_value[:raw_value.index("-") + 1] if "-" in raw_value[:12] else raw_value[:4]
+    service = service or (
+        svc_info.service_id if svc_info else Prompt.ask("Service name")
+    )
+    prefix = (
+        raw_value[: raw_value.index("-") + 1]
+        if "-" in raw_value[:12]
+        else raw_value[:4]
+    )
 
-    nonce, cipher = encrypt_entry_value(key, "_tmp_", raw_value)
+    # FIX #2: Generate UUID first — encrypt once with the correct subkey.
+    # Previously: encrypted with '_tmp_' (wrong subkey), then re-encrypted.
+    entry_id = str(uuid.uuid4())
+    nonce, cipher = encrypt_entry_value(key, entry_id, raw_value)
+
     entry = APIKeyEntry(
+        id=entry_id,
         name=name,
         service=service,
         nonce_hex=nonce.hex(),
@@ -195,10 +234,6 @@ def add(
         tags=tags or "",
         expires_at=parse_expiry_date(expires or ""),
     )
-    # Re-encrypt with the real UUID
-    nonce2, cipher2 = encrypt_entry_value(key, entry.id, raw_value)
-    entry.nonce_hex = nonce2.hex()
-    entry.cipher_hex = cipher2.hex()
 
     payload.add_entry(entry)
     _save_payload(payload, key, params)
@@ -215,7 +250,7 @@ def list_keys(
     service: Optional[str] = typer.Option(None, "--service"),
     expired: bool = typer.Option(False, "--expired"),
     sort: str = typer.Option("name", "--sort", help="name|service|added|expires"),
-):
+) -> None:
     """List API keys (no values shown)."""
     key = _require_unlocked()
     payload = _load_payload(key)
@@ -261,7 +296,7 @@ def get(
     show: bool = typer.Option(False, "--show", help="Show masked value"),
     raw: bool = typer.Option(False, "--raw", help="Print raw value to stdout (for piping)"),
     env: bool = typer.Option(False, "--env", help="Print as export ENV_VAR=value"),
-):
+) -> None:
     """Copy API key to clipboard (or print in various formats)."""
     key = _require_unlocked()
     payload = _load_payload(key)
@@ -272,13 +307,14 @@ def get(
         raise typer.Exit(1)
 
     value = decrypt_entry_value(
-        key, entry.id,
+        key,
+        entry.id,
         bytes.fromhex(entry.nonce_hex),
-        bytes.fromhex(entry.cipher_hex)
+        bytes.fromhex(entry.cipher_hex),
     )
 
+    # FIX #4: datetime imported at module level — no inline import needed
     entry.access_count += 1
-    from datetime import datetime, timezone
     entry.last_accessed_at = datetime.now(timezone.utc)
     params = storage.read_kdf_params()
     _save_payload(payload, key, params)
@@ -296,7 +332,7 @@ def get(
 
 
 @app.command()
-def delete(name: str = typer.Argument(...)):
+def delete(name: str = typer.Argument(...)) -> None:
     """Delete an API key (requires double confirmation)."""
     key = _require_unlocked()
     payload = _load_payload(key)
@@ -310,7 +346,7 @@ def delete(name: str = typer.Argument(...)):
     console.print(f"[yellow]About to delete: {entry.name} ({entry.service})[/yellow]")
     if not Confirm.ask("Are you sure?"):
         raise typer.Exit(0)
-    confirm_name = Prompt.ask(f"Type the key name to confirm")
+    confirm_name = Prompt.ask("Type the key name to confirm")
     if confirm_name != entry.name:
         console.print("[red]❌ Name mismatch. Deletion cancelled.[/red]")
         raise typer.Exit(1)
@@ -322,7 +358,7 @@ def delete(name: str = typer.Argument(...)):
 
 
 @app.command()
-def info(name: str = typer.Argument(...)):
+def info(name: str = typer.Argument(...)) -> None:
     """Show detailed metadata for a key (no value shown)."""
     key = _require_unlocked()
     payload = _load_payload(key)
@@ -341,15 +377,16 @@ def info(name: str = typer.Argument(...)):
         f"Created:     {entry.created_at.strftime('%Y-%m-%d %H:%M UTC')}\n"
         f"Updated:     {entry.updated_at.strftime('%Y-%m-%d %H:%M UTC')}\n"
         f"Expires:     {entry.expires_at.strftime('%Y-%m-%d') if entry.expires_at else '—'}\n"
-        f"Last access: {entry.last_accessed_at.strftime('%Y-%m-%d %H:%M UTC') if entry.last_accessed_at else 'Never'}\n"
+        f"Last access: "
+        f"{entry.last_accessed_at.strftime('%Y-%m-%d %H:%M UTC') if entry.last_accessed_at else 'Never'}\n"
         f"Access count:{entry.access_count}\n"
         f"Status:      [{color}]{entry.status_label}[/{color}]",
-        title="Key Info", expand=False
+        title="Key Info", expand=False,
     ))
 
 
 @app.command()
-def rotate(name: str = typer.Argument(...)):
+def rotate(name: str = typer.Argument(...)) -> None:
     """Rotate an API key — replace with a new value."""
     key = _require_unlocked()
     payload = _load_payload(key)
@@ -363,7 +400,8 @@ def rotate(name: str = typer.Argument(...)):
     new_value = typer.prompt("New API key value", hide_input=True)
     new_value = validate_api_key_value(new_value)
     nonce, cipher = encrypt_entry_value(key, entry.id, new_value)
-    from datetime import datetime, timezone
+
+    # FIX #4: datetime already imported at module level
     entry.nonce_hex = nonce.hex()
     entry.cipher_hex = cipher.hex()
     entry.updated_at = datetime.now(timezone.utc)
@@ -374,7 +412,7 @@ def rotate(name: str = typer.Argument(...)):
 
 
 @app.command()
-def change_password():
+def change_password() -> None:
     """Change the master password and re-encrypt the entire wallet."""
     key = _require_unlocked()
     payload = _load_payload(key)
@@ -394,11 +432,12 @@ def change_password():
     new_key = derive_key(new_pass, new_params)
     payload.master_hash = hash_master_password(new_pass)
 
-    # Re-encrypt all individual key entries with new master key
     for entry in payload.keys.values():
-        old_value = decrypt_entry_value(key, entry.id,
-                                         bytes.fromhex(entry.nonce_hex),
-                                         bytes.fromhex(entry.cipher_hex))
+        old_value = decrypt_entry_value(
+            key, entry.id,
+            bytes.fromhex(entry.nonce_hex),
+            bytes.fromhex(entry.cipher_hex),
+        )
         nonce, cipher = encrypt_entry_value(new_key, entry.id, old_value)
         entry.nonce_hex = nonce.hex()
         entry.cipher_hex = cipher.hex()
@@ -413,13 +452,11 @@ def change_password():
 def export_wallet(
     output: str = typer.Option("backup.enc", "--output", "-o"),
     password: bool = typer.Option(True, "--password/--no-password"),
-):
+) -> None:
     """Export wallet to an encrypted backup file."""
     key = _require_unlocked()
     payload = _load_payload(key)
-    params = storage.read_kdf_params()
 
-    from pathlib import Path
     out_path = Path(output)
 
     if password:
@@ -430,13 +467,11 @@ def export_wallet(
             raise typer.Exit(1)
         export_params = KDFParams.generate()
         export_key = derive_key(export_pass, export_params)
-        export_storage = WalletStorage(out_path)
-        export_storage.save(export_key, export_params, payload.to_dict())
+        WalletStorage(out_path).save(export_key, export_params, payload.to_dict())
     else:
         console.print("[red bold]⚠  WARNING: Plaintext export contains unencrypted API keys![/red bold]")
         if not Confirm.ask("Are you absolutely sure?"):
             raise typer.Exit(0)
-        import json
         out_path.write_text(json.dumps(payload.to_dict(), indent=2))
 
     audit_log("EXPORT", status="OK", extra=str(out_path))
@@ -446,15 +481,13 @@ def export_wallet(
 @app.command(name="import")
 def import_wallet(
     file: str = typer.Argument(...),
-    strategy: str = typer.Option("ask", "--on-conflict", help="skip|overwrite|rename"),
-):
+    strategy: str = typer.Option("rename", "--on-conflict", help="skip|overwrite|rename"),
+) -> None:
     """Import keys from an encrypted or plaintext backup file."""
     key = _require_unlocked()
     payload = _load_payload(key)
     params = storage.read_kdf_params()
 
-    from pathlib import Path
-    import json
     src = Path(file)
     if not src.exists():
         console.print(f"[red]❌ File not found: {file}[/red]")
@@ -471,14 +504,14 @@ def import_wallet(
 
     import_payload = WalletPayload.from_dict(import_data)
     added = 0
-    for entry_id, entry in import_payload.keys.items():
+    for _entry_id, entry in import_payload.keys.items():
         existing = payload.get_entry(entry.name)
         if existing:
             if strategy == "skip":
                 continue
             elif strategy == "overwrite":
                 payload.keys[existing.id] = entry
-            else:
+            else:  # rename
                 n, new_name = 1, f"{entry.name}_imported_1"
                 while payload.get_entry(new_name):
                     n += 1
@@ -495,14 +528,14 @@ def import_wallet(
 
 
 @app.command()
-def tui():
+def tui() -> None:
     """Launch the interactive TUI (full-screen terminal interface)."""
     from wallet.ui.tui import run_tui
     run_tui()
 
 
 @app.command()
-def gui():
+def gui() -> None:
     """Launch the graphical GUI (customtkinter)."""
     from wallet.ui.gui import run_gui
     run_gui()

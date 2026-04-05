@@ -10,19 +10,26 @@ Binary format of wallet.enc:
   [M bytes]  ciphertext: AES-GCM encrypted+authenticated payload (JSON wallet data)
 
 Design decisions:
-- Atomic writes via temp file + os.replace() prevent partial writes from
-  corrupting the wallet even on power loss.
-- chmod 600 is enforced on every write (Unix).
+- Atomic writes via temp file + os.replace() prevent partial writes.
+- chmod 600 is enforced on every write (Unix only — Windows handled separately).
 - Timestamped backups are created in backups/ on every write.
 - AAD (Associated Authenticated Data) = SHA-256(wallet_path) binds the
   ciphertext to its intended location, preventing file relocation attacks.
+
+FIX #5 (MODERATE) v1.1:
+  _check_permissions() previously silently skipped on Windows/WSL2 (os.name=="nt").
+  Now: on Windows, permissions are checked via icacls subprocess; if that's
+  unavailable (WSL2 mapped drives, network shares), a WARNING is logged instead
+  of silently passing — so the user knows the check was skipped.
 """
 
 import json
+import logging
 import os
 import shutil
 import stat
 import struct
+import subprocess
 from datetime import datetime
 from pathlib import Path
 
@@ -30,6 +37,8 @@ from cryptography.exceptions import InvalidTag
 
 from wallet.core.crypto import decrypt_aes_gcm, encrypt_aes_gcm, wallet_aad
 from wallet.core.kdf import KDFParams
+
+log = logging.getLogger(__name__)
 
 MAGIC = b"VKEY"
 VERSION = 1
@@ -96,14 +105,14 @@ class WalletStorage:
         try:
             tmp_path.write_bytes(raw)
             self._set_secure_permissions(tmp_path)
-            os.replace(tmp_path, self.wallet_path)   # atomic on POSIX
+            os.replace(tmp_path, self.wallet_path)
             self._set_secure_permissions(self.wallet_path)
         except OSError as exc:
-            if tmp_path.exists():
-                tmp_path.unlink(missing_ok=True)
+            tmp_path.unlink(missing_ok=True)
             if "No space left" in str(exc):
                 raise OSError(
-                    "Disk full. Wallet NOT saved. Free space and retry. Previous version intact."
+                    "Disk full. Wallet NOT saved. "
+                    "Free space and retry. Previous version intact."
                 ) from exc
             raise
 
@@ -154,20 +163,65 @@ class WalletStorage:
             old.unlink(missing_ok=True)
 
     # ------------------------------------------------------------------ #
-    # Permission helpers
+    # Permission helpers  (FIX #5)
     # ------------------------------------------------------------------ #
 
     def _check_permissions(self) -> None:
-        if os.name == "nt" or not self.wallet_path.exists():
+        """
+        Verify that wallet.enc is not readable by group/other.
+
+        Unix:    stat() mode check — raises PermissionError if mode & 0o077.
+        Windows: attempt icacls check via subprocess; emit WARNING if unavailable.
+        WSL2 / mounted drives: icacls is not available — log WARNING, don't crash.
+        """
+        if not self.wallet_path.exists():
             return
-        mode = stat.S_IMODE(self.wallet_path.stat().st_mode)
-        if mode & 0o077:
-            raise PermissionError(
-                f"Wallet file has unsafe permissions ({oct(mode)}).\n"
-                f"Fix with: chmod 600 {self.wallet_path}"
+
+        if os.name != "nt":
+            # POSIX — strict check
+            mode = stat.S_IMODE(self.wallet_path.stat().st_mode)
+            if mode & 0o077:
+                raise PermissionError(
+                    f"Wallet file has unsafe permissions ({oct(mode)}).\n"
+                    f"Fix with: chmod 600 {self.wallet_path}"
+                )
+        else:
+            # Windows: try icacls
+            self._check_permissions_windows()
+
+    def _check_permissions_windows(self) -> None:
+        """
+        On Windows, attempt to verify via icacls that only the current user
+        has access. If icacls is unavailable (WSL2 mapped drive, network share),
+        emit a WARNING instead of crashing.
+        """
+        try:
+            result = subprocess.run(
+                ["icacls", str(self.wallet_path)],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            output = result.stdout
+            # Flag if "Everyone" or "Users" group has explicit access
+            risky_principals = ["Everyone", "BUILTIN\\Users", "Authenticated Users"]
+            for principal in risky_principals:
+                if principal in output:
+                    log.warning(
+                        "SECURITY WARNING: wallet.enc may be readable by '%s'. "
+                        "Run: icacls wallet.enc /inheritance:r /grant:r \"%s:(R,W)\"",
+                        principal,
+                        os.environ.get("USERNAME", "CurrentUser"),
+                    )
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+            # icacls not available (WSL2, Cygwin, network share, etc.)
+            log.warning(
+                "SECURITY WARNING: Could not verify wallet.enc permissions on this "
+                "platform. Ensure only your user account has read/write access."
             )
 
     @staticmethod
     def _set_secure_permissions(path: Path) -> None:
+        """Set 600 permissions on Unix; no-op on Windows (icacls must be set manually)."""
         if os.name != "nt":
             os.chmod(path, 0o600)
