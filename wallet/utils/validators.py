@@ -1,76 +1,102 @@
 """
-validators.py — Input validation helpers for CLI and GUI.
+validators.py — Input validation for CLI prompts.
 
-FIX #7 (MINOR) v1.1 — API key length cap:
-  Previously validate_api_key_value() had no upper-bound check.
-  A 1MB+ string would pass validation, get encrypted, and be stored.
-  Added MAX_API_KEY_LENGTH = 8192 bytes — well above any real API key
-  (longest known: GitHub fine-grained PATs ~230 chars; JWTs up to ~2KB).
-  8192 chars covers all realistic use-cases while rejecting payloads
-  that could be used for abuse (e.g., accidentally pasting an entire
-  private key file instead of an API key).
+Validation rules:
+  - API key name: 1–128 chars, no leading/trailing whitespace, no control chars.
+  - API key value: 8–512 chars, printable ASCII only, no whitespace.
+  - Expiry date: ISO YYYY-MM-DD, must be in the future.
+
+Design decisions:
+- All validators raise typer.BadParameter for clean Typer error display.
+- validate_api_key_value() deliberately rejects whitespace to prevent
+  accidental copy-paste of surrounding whitespace with the key.
+- We do NOT validate that the API key is a valid key for any specific service.
+  That would require network calls, which is out of scope for an offline tool.
 """
 
-import re
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Optional
 
-MAX_API_KEY_LENGTH = 8192   # chars — covers all real API keys + JWTs
-MIN_API_KEY_LENGTH = 8      # chars — reject obvious garbage
+import typer
+
+
+def validate_key_name(value: str) -> str:
+    """Strip and validate a key name. Returns cleaned name."""
+    value = value.strip()
+    if not value:
+        raise typer.BadParameter("Key name cannot be empty.")
+    if len(value) > 128:
+        raise typer.BadParameter("Key name too long (max 128 characters).")
+    if any(ord(c) < 32 for c in value):
+        raise typer.BadParameter("Key name contains invalid control characters.")
+    return value
+
+
+def validate_api_key_value(value: str) -> str:
+    """Validate an API key value. Returns the value unchanged if valid."""
+    # Strip surrounding whitespace only — leading/trailing spaces are common paste artifacts
+    value = value.strip()
+    if len(value) < 8:
+        raise typer.BadParameter(
+            "API key value too short (min 8 characters). "
+            "Are you sure you pasted the full key?"
+        )
+    if len(value) > 512:
+        raise typer.BadParameter(
+            "API key value too long (max 512 characters). "
+            "Are you storing the right thing?"
+        )
+    if not value.isprintable():
+        raise typer.BadParameter(
+            "API key value contains non-printable characters. "
+            "Ensure you copied the raw key, not a formatted version."
+        )
+    if " " in value or "\t" in value:
+        raise typer.BadParameter(
+            "API key value contains whitespace. "
+            "Keys should not contain spaces or tabs."
+        )
+    return value
 
 
 def parse_expiry_date(value: str) -> Optional[datetime]:
     """
-    Parse an expiry date string in YYYY-MM-DD format.
-    Returns None if value is empty or None.
-    Raises ValueError with a clear message on invalid format.
-    """
-    if not value or value.strip() == "":
-        return None
-    try:
-        dt = datetime.strptime(value.strip(), "%Y-%m-%d")
-        return dt.replace(tzinfo=timezone.utc)
-    except ValueError:
-        raise ValueError(
-            f"Invalid date '{value}'. Use YYYY-MM-DD format (e.g., 2025-12-31)."
-        )
+    Parse an optional expiry date string (YYYY-MM-DD).
 
+    Returns:
+        datetime with UTC timezone if a valid future date was provided.
+        None if value is empty/blank.
 
-def validate_key_name(name: str) -> str:
-    """Ensure key name is non-empty and reasonably short."""
-    name = name.strip()
-    if not name:
-        raise ValueError("Key name cannot be empty.")
-    if len(name) > 100:
-        raise ValueError("Key name too long (max 100 characters).")
-    return name
-
-
-def validate_api_key_value(value: str) -> str:
-    """
-    Validate an API key value before encryption.
-
-    Checks:
-    - Non-empty after strip
-    - No internal whitespace (API keys never contain spaces/tabs/newlines)
-    - Minimum length of MIN_API_KEY_LENGTH (rejects obvious garbage)
-    - Maximum length of MAX_API_KEY_LENGTH (FIX #7: prevents giant payload abuse)
+    Raises:
+        typer.BadParameter if the format is wrong or the date is in the past.
     """
     value = value.strip()
     if not value:
-        raise ValueError("API key value cannot be empty.")
-    if re.search(r"\s", value):
-        raise ValueError(
-            "API key value must not contain whitespace. "
-            "Did you accidentally paste extra content?"
+        return None
+
+    try:
+        d = date.fromisoformat(value)
+    except ValueError:
+        raise typer.BadParameter(
+            f"Invalid date format '{value}'. Use YYYY-MM-DD (e.g. 2026-12-31)."
         )
-    if len(value) < MIN_API_KEY_LENGTH:
-        raise ValueError(
-            f"API key value is suspiciously short (min {MIN_API_KEY_LENGTH} chars)."
+
+    expiry = datetime(d.year, d.month, d.day, 23, 59, 59, tzinfo=timezone.utc)
+    if expiry < datetime.now(timezone.utc):
+        raise typer.BadParameter(
+            f"Expiry date '{value}' is in the past. Use a future date."
         )
-    if len(value) > MAX_API_KEY_LENGTH:
-        raise ValueError(
-            f"API key value is too long ({len(value)} chars, max {MAX_API_KEY_LENGTH}). "
-            "This doesn't look like an API key. Did you paste the wrong content?"
-        )
-    return value
+    return expiry
+
+
+def validate_tag_list(value: str) -> list[str]:
+    """Parse and validate a comma-separated tag list."""
+    tags = [t.strip().lower() for t in value.split(",") if t.strip()]
+    for tag in tags:
+        if len(tag) > 32:
+            raise typer.BadParameter(f"Tag '{tag}' is too long (max 32 characters).")
+        if not tag.replace("-", "").replace("_", "").isalnum():
+            raise typer.BadParameter(
+                f"Tag '{tag}' contains invalid characters. Use letters, digits, hyphens, underscores."
+            )
+    return tags
