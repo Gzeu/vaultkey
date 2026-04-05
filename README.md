@@ -1,143 +1,120 @@
-# 🔐 VaultKey
+# VaultKey 🔐
 
-**Secure, fast, offline API Key Wallet** — AES-256-GCM encrypted, Argon2id key derivation, CLI + TUI + GUI.
+> Ultra-secure local API key wallet — AES-256-GCM · Argon2id · HMAC Integrity · Zero cloud dependency
+
+[![Python](https://img.shields.io/badge/python-3.11%2B-blue)](https://python.org)
+[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![Security](https://img.shields.io/badge/encryption-AES--256--GCM-red)](https://en.wikipedia.org/wiki/AES-GCM)
+
+## Overview
+
+VaultKey stores your API keys locally in an encrypted binary file (`wallet.enc`).  
+No cloud sync. No telemetry. No vendor lock-in. Your keys never leave your machine.
 
 ## Security Architecture
 
-- **AES-256-GCM** encryption for the entire wallet and per-entry sub-keys
-- **Argon2id** (64MB RAM, 3 iterations) for master password key derivation
-- **HKDF-SHA256** per-entry sub-key derivation (defense-in-depth)
-- **AAD binding** — wallet is cryptographically bound to its file path
-- **SecureMemory** — sensitive data zeroed in RAM via `ctypes.memset` on cleanup
-- **Auto-lock** after 15 minutes of inactivity
-- **Clipboard auto-clear** after 30 seconds
-- **Atomic writes** — no partial corruption on power loss
-- **Audit log** — append-only, zero sensitive data logged
-- **Anti-brute-force** — exponential delay + 60s hard lockout after 5 failures
-
-## Installation
-
-```bash
-# With Poetry
-poetry install
-
-# Or with pip
-pip install -e .
-```
+| Layer | Technology | Parameters |
+|---|---|---|
+| Key Derivation | Argon2id | 64MB RAM · 3 iterations · 4 threads |
+| Encryption | AES-256-GCM | 96-bit nonce · 128-bit AEAD tag |
+| Per-entry subkeys | HKDF-SHA256 | Domain salt + entry UUID info |
+| Password verification | Argon2id hash | Separate salt, stored encrypted |
+| Integrity manifest | HMAC-SHA256 | Over all entry IDs + ciphertexts |
+| AAD binding | SHA-256(wallet_path) | Prevents file relocation attacks |
+| Memory security | ctypes.memset | Key zeroed on lock/timeout |
+| File permissions | chmod 600 | User-only read/write |
+| Atomic writes | temp + os.replace() | No partial writes on crash |
+| Audit log | JSON-Lines | Per-event PID + user + timestamp |
 
 ## Quick Start
 
 ```bash
-# 1. Initialize your wallet
+# Install
+pip install vaultkey  # or: poetry install
+
+# Initialize wallet
 wallet init
 
-# 2. Unlock (enter master password once per session)
+# Unlock session (15-min auto-lock)
 wallet unlock
 
-# 3. Add your first API key
+# Add an API key
 wallet add --name "OpenAI Production" --tags "ai,production"
 
-# 4. List all keys
-wallet list
+# Copy to clipboard (auto-clears after 30s)
+wallet get "OpenAI Production"
 
-# 5. Copy a key to clipboard (clears in 30s)
-wallet get openai-production
-
-# 6. Show masked key value
-wallet get openai-production --show
-
-# 7. Export as shell env var
-wallet get openai-production --env
-
-# 8. View details (no key value shown)
-wallet info openai-production
-
-# 9. Rotate a key
-wallet rotate openai-production
-
-# 10. Delete a key
-wallet delete openai-production
-
-# 11. Launch TUI
+# Interactive TUI
 wallet tui
-
-# 12. Launch GUI
-wallet gui
-
-# 13. Lock wallet
-wallet lock
 ```
 
-## All CLI Commands
+## CLI Commands
 
 | Command | Description |
 |---|---|
-| `wallet init` | Create new wallet |
-| `wallet unlock` | Unlock with master password |
-| `wallet lock` | Lock and clear session |
-| `wallet status` | Show wallet status |
-| `wallet add` | Add new API key (interactive or flags) |
+| `wallet init` | Initialize a new encrypted wallet |
+| `wallet unlock` | Unlock the wallet (derive session key) |
+| `wallet lock` | Lock and zero the session key |
+| `wallet status` | Show session status and key count |
+| `wallet add` | Add a new API key |
+| `wallet get <name>` | Copy key to clipboard |
+| `wallet get <name> --show` | Show masked key value |
+| `wallet get <name> --raw` | Print raw value (for piping) |
+| `wallet get <name> --env` | Print as `export ENV_VAR=value` |
 | `wallet list` | List all keys (no values) |
-| `wallet get <name>` | Copy to clipboard |
-| `wallet get <name> --show` | Show masked value |
-| `wallet get <name> --env` | Print as `export VAR=value` |
-| `wallet get <name> --raw` | Raw stdout (for piping) |
-| `wallet info <name>` | Show full metadata |
-| `wallet delete <name>` | Delete with double confirm |
+| `wallet list --tag ai` | Filter by tag |
+| `wallet list --sort expires` | Sort by expiry |
+| `wallet delete <name>` | Delete with double confirmation |
 | `wallet rotate <name>` | Replace key value |
-| `wallet change-password` | Re-encrypt with new password |
+| `wallet info <name>` | Show detailed metadata |
+| `wallet health` | Wallet-wide key health report |
+| `wallet audit` | View recent audit log events |
+| `wallet verify` | Run integrity check on wallet |
+| `wallet change-password` | Re-key entire wallet |
 | `wallet export` | Export encrypted backup |
 | `wallet import <file>` | Import from backup |
-| `wallet tui` | Full-screen TUI |
-| `wallet gui` | Graphical GUI |
+| `wallet wipe` | Emergency secure destruction |
+| `wallet tui` | Launch interactive TUI |
+| `wallet gui` | Launch GUI |
 
-## Project Structure
+## Security Guarantees
+
+- **Keys never touch disk unencrypted** — encrypted before `save()` is called
+- **Per-entry subkeys** — compromise of one entry does not leak others
+- **Brute-force protection** — exponential backoff (1s → 2s → 4s → 60s hard lockout)
+- **Anti-relocation** — AAD binding prevents moving `wallet.enc` to another path
+- **Integrity detection** — HMAC manifest detects silent bit-rot or tampering
+- **Audit trail** — every operation logged to `audit.log` (JSON-Lines, chmod 600)
+- **Clipboard hygiene** — auto-clear after 30 seconds
+- **Panic wipe** — 3-pass DoD overwrite of wallet + all backups
+
+## File Layout
 
 ```
-vaultkey/
-├── wallet/
-│   ├── core/
-│   │   ├── crypto.py      # AES-GCM, HKDF, SecureMemory
-│   │   ├── kdf.py         # Argon2id KDF
-│   │   ├── storage.py     # Binary format, atomic write, backup
-│   │   └── session.py     # SessionManager, timeout, brute-force
-│   ├── models/
-│   │   ├── wallet.py      # Pydantic v2 models
-│   │   └── config.py      # Non-secret settings
-│   ├── ui/
-│   │   ├── cli.py         # Typer CLI (all commands)
-│   │   ├── tui.py         # Textual TUI
-│   │   └── gui.py         # CustomTkinter GUI
-│   └── utils/
-│       ├── audit.py       # Append-only audit logger
-│       ├── clipboard.py   # Clipboard + auto-clear
-│       ├── prefix_detect.py # API key prefix auto-detection
-│       └── validators.py  # Input validation
-├── tests/
-│   ├── test_crypto.py
-│   ├── test_kdf.py
-│   ├── test_storage.py
-│   └── test_session.py
-├── backups/           # Auto-created, auto-pruned
-├── wallet.enc         # ⚠️  NOT committed (in .gitignore)
-├── audit.log          # ⚠️  NOT committed
-├── pyproject.toml
-├── .env.example
-└── .gitignore
+~/.local/share/vaultkey/
+├── wallet.enc      # Encrypted wallet (chmod 600)
+├── audit.log       # JSON-Lines audit trail (chmod 600)
+└── backups/
+    ├── wallet_20250101_120000.enc
+    └── ...
 ```
 
-## Running Tests
+## Configuration
+
+Set via environment variables or `.env` file:
 
 ```bash
-poetry run pytest
-# With coverage report:
-poetry run pytest --cov=wallet/core --cov-report=html
+VAULTKEY_WALLET_PATH=/secure/volume/wallet.enc
+VAULTKEY_SESSION_TIMEOUT_MINUTES=10
+VAULTKEY_CLIPBOARD_CLEAR_SECONDS=15
+VAULTKEY_MAX_BACKUPS=30
+VAULTKEY_ENABLE_INTEGRITY_CHECK=true
 ```
 
-## Security Notes
+## Development
 
-- `wallet.enc` and `audit.log` are in `.gitignore` — **never commit them**
-- Run `chmod 600 wallet.enc` to restrict file permissions
-- Use a strong master password (min 16 chars recommended)
-- Rotate API keys regularly (use `wallet rotate <name>`)
-- Export backups with a **different** strong password
+```bash
+poetry install
+poetry run pytest
+poetry run wallet --help
+```

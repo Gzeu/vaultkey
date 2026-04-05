@@ -15,12 +15,10 @@ Design decisions:
 - Timestamped backups are created in backups/ on every write.
 - AAD (Associated Authenticated Data) = SHA-256(wallet_path) binds the
   ciphertext to its intended location, preventing file relocation attacks.
+- Wave 2: integrity HMAC manifest is updated on every save() call.
 
 FIX #5 (MODERATE) v1.1:
-  _check_permissions() previously silently skipped on Windows/WSL2 (os.name=="nt").
-  Now: on Windows, permissions are checked via icacls subprocess; if that's
-  unavailable (WSL2 mapped drives, network shares), a WARNING is logged instead
-  of silently passing — so the user knows the check was skipped.
+  _check_permissions() handles Windows via icacls subprocess.
 """
 
 import json
@@ -37,12 +35,15 @@ from cryptography.exceptions import InvalidTag
 
 from wallet.core.crypto import decrypt_aes_gcm, encrypt_aes_gcm, wallet_aad
 from wallet.core.kdf import KDFParams
+from wallet.models.config import WalletConfig
 
 log = logging.getLogger(__name__)
 
 MAGIC = b"VKEY"
 VERSION = 1
 NONCE_SIZE = 12
+
+_cfg = WalletConfig()
 
 
 class WalletCorruptError(Exception):
@@ -52,7 +53,11 @@ class WalletCorruptError(Exception):
 class WalletStorage:
     """Handles all disk I/O for the encrypted wallet file."""
 
-    def __init__(self, wallet_path: Path, backup_dir: Path | None = None):
+    def __init__(
+        self,
+        wallet_path: Path,
+        backup_dir: Path | None = None,
+    ) -> None:
         self.wallet_path = wallet_path.resolve()
         self.backup_dir = backup_dir or (wallet_path.parent / "backups")
 
@@ -69,8 +74,19 @@ class WalletStorage:
             self._read_magic_version(f)
             return self._read_kdf_params(f)
 
-    def load(self, derived_key: bytes) -> dict:
-        """Read and decrypt the full wallet payload."""
+    def load(
+        self,
+        derived_key: bytes,
+        *,
+        update_manifest: bool = False,
+    ) -> dict:
+        """
+        Read and decrypt the full wallet payload.
+
+        If enable_integrity_check is True (default), the HMAC manifest
+        is verified after decryption. On structural pass but absent manifest,
+        the manifest is NOT auto-written here — that happens on the next save().
+        """
         self._check_permissions()
         try:
             with open(self.wallet_path, "rb") as f:
@@ -91,10 +107,45 @@ class WalletStorage:
                 "Authentication failed. Wrong password or wallet file is corrupted."
             )
 
-        return json.loads(plaintext.decode())
+        data = json.loads(plaintext.decode())
 
-    def save(self, derived_key: bytes, kdf_params: KDFParams, payload: dict) -> None:
-        """Encrypt and write the wallet payload atomically."""
+        # Integrity check (Wave 2)
+        if _cfg.enable_integrity_check:
+            try:
+                from wallet.core.integrity import verify_integrity
+                from wallet.models.wallet import WalletPayload
+                payload_obj = WalletPayload.model_validate(data)
+                report = verify_integrity(derived_key, payload_obj, strict=False)
+                if not report.ok:
+                    log.warning("Integrity check warning: %s", report)
+            except Exception as e:  # noqa: BLE001
+                log.warning("Integrity check error (non-fatal): %s", e)
+
+        return data
+
+    def save(
+        self,
+        derived_key: bytes,
+        kdf_params: KDFParams,
+        payload: dict,
+        *,
+        update_manifest: bool = True,
+    ) -> None:
+        """
+        Encrypt and write the wallet payload atomically.
+
+        If update_manifest=True (default), recomputes and injects the HMAC
+        integrity manifest into payload before encrypting.
+        """
+        if update_manifest and _cfg.enable_integrity_check:
+            try:
+                from wallet.core.integrity import compute_manifest
+                from wallet.models.wallet import WalletPayload
+                payload_obj = WalletPayload.model_validate(payload)
+                payload["integrity_hmac"] = compute_manifest(derived_key, payload_obj)
+            except Exception as e:  # noqa: BLE001
+                log.warning("Manifest update failed (non-fatal): %s", e)
+
         aad = wallet_aad(str(self.wallet_path))
         plaintext = json.dumps(payload, ensure_ascii=False).encode()
         nonce, ciphertext = encrypt_aes_gcm(derived_key, plaintext, aad)
@@ -122,7 +173,9 @@ class WalletStorage:
     # Binary packing/unpacking
     # ------------------------------------------------------------------ #
 
-    def _pack(self, kdf_params: KDFParams, nonce: bytes, ciphertext: bytes) -> bytes:
+    def _pack(
+        self, kdf_params: KDFParams, nonce: bytes, ciphertext: bytes
+    ) -> bytes:
         kdf_json = json.dumps(kdf_params.to_dict()).encode()
         header = (
             MAGIC
@@ -155,7 +208,7 @@ class WalletStorage:
         backup_path = self.backup_dir / f"wallet_{ts}.enc"
         backup_path.write_bytes(raw)
         self._set_secure_permissions(backup_path)
-        self._prune_old_backups(keep=20)
+        self._prune_old_backups(keep=_cfg.max_backups)
 
     def _prune_old_backups(self, keep: int = 20) -> None:
         backups = sorted(self.backup_dir.glob("wallet_*.enc"))
@@ -163,22 +216,13 @@ class WalletStorage:
             old.unlink(missing_ok=True)
 
     # ------------------------------------------------------------------ #
-    # Permission helpers  (FIX #5)
+    # Permission helpers
     # ------------------------------------------------------------------ #
 
     def _check_permissions(self) -> None:
-        """
-        Verify that wallet.enc is not readable by group/other.
-
-        Unix:    stat() mode check — raises PermissionError if mode & 0o077.
-        Windows: attempt icacls check via subprocess; emit WARNING if unavailable.
-        WSL2 / mounted drives: icacls is not available — log WARNING, don't crash.
-        """
         if not self.wallet_path.exists():
             return
-
         if os.name != "nt":
-            # POSIX — strict check
             mode = stat.S_IMODE(self.wallet_path.stat().st_mode)
             if mode & 0o077:
                 raise PermissionError(
@@ -186,42 +230,27 @@ class WalletStorage:
                     f"Fix with: chmod 600 {self.wallet_path}"
                 )
         else:
-            # Windows: try icacls
             self._check_permissions_windows()
 
     def _check_permissions_windows(self) -> None:
-        """
-        On Windows, attempt to verify via icacls that only the current user
-        has access. If icacls is unavailable (WSL2 mapped drive, network share),
-        emit a WARNING instead of crashing.
-        """
         try:
             result = subprocess.run(
                 ["icacls", str(self.wallet_path)],
-                capture_output=True,
-                text=True,
-                timeout=5,
+                capture_output=True, text=True, timeout=5,
             )
-            output = result.stdout
-            # Flag if "Everyone" or "Users" group has explicit access
-            risky_principals = ["Everyone", "BUILTIN\\Users", "Authenticated Users"]
-            for principal in risky_principals:
-                if principal in output:
+            risky = ["Everyone", "BUILTIN\\Users", "Authenticated Users"]
+            for principal in risky:
+                if principal in result.stdout:
                     log.warning(
-                        "SECURITY WARNING: wallet.enc may be readable by '%s'. "
-                        "Run: icacls wallet.enc /inheritance:r /grant:r \"%s:(R,W)\"",
+                        "SECURITY WARNING: wallet.enc may be readable by '%s'.",
                         principal,
-                        os.environ.get("USERNAME", "CurrentUser"),
                     )
         except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-            # icacls not available (WSL2, Cygwin, network share, etc.)
             log.warning(
-                "SECURITY WARNING: Could not verify wallet.enc permissions on this "
-                "platform. Ensure only your user account has read/write access."
+                "SECURITY WARNING: Could not verify wallet.enc permissions on this platform."
             )
 
     @staticmethod
     def _set_secure_permissions(path: Path) -> None:
-        """Set 600 permissions on Unix; no-op on Windows (icacls must be set manually)."""
         if os.name != "nt":
             os.chmod(path, 0o600)

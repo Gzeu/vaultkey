@@ -2,11 +2,13 @@
 wallet.py — Pydantic v2 data models for wallet payload and API key entries.
 
 Design decisions:
-- All models use model_config with strict=True to prevent silent type coercion.
-- Encrypted API key values are stored as two separate fields: nonce_hex + cipher_hex.
-  This makes the binary structure explicit and serialization/deserialization safe.
-- expires_at and last_accessed_at are Optional to avoid forcing fields on creation.
-- access_count tracks usage without storing the actual key value in logs.
+- All models use strict=False for forward-compat with extra fields on load.
+- Encrypted API key values stored as nonce_hex + cipher_hex (explicit, safe serialization).
+- integrity_hmac: optional HMAC-SHA256 manifest over all entries (added Wave 2).
+  - Absent on wallets created before v1.1 (auto-migrated on next save).
+  - Verified on load when enable_integrity_check=True.
+- WalletPayload.search() supports fuzzy substring matching on name, service, tags.
+- rotation_reminder_days: default 90 — triggers 'expiring' status label warning.
 """
 
 import uuid
@@ -26,9 +28,9 @@ class APIKeyEntry(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     name: str
     service: str
-    nonce_hex: str                          # AES-GCM nonce (hex)
-    cipher_hex: str                         # AES-GCM ciphertext+tag (hex)
-    prefix: Optional[str] = None           # Auto-detected (sk-, gsk_, etc.)
+    nonce_hex: str
+    cipher_hex: str
+    prefix: Optional[str] = None
     description: Optional[str] = None
     tags: list[str] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=_now_utc)
@@ -41,10 +43,17 @@ class APIKeyEntry(BaseModel):
 
     @field_validator("tags", mode="before")
     @classmethod
-    def normalize_tags(cls, v):
+    def normalize_tags(cls, v: object) -> list[str]:
         if isinstance(v, str):
             return [t.strip().lower() for t in v.split(",") if t.strip()]
-        return [t.lower() for t in v]
+        if isinstance(v, list):
+            return [str(t).lower().strip() for t in v if str(t).strip()]
+        return []
+
+    @field_validator("name", mode="before")
+    @classmethod
+    def strip_name(cls, v: object) -> str:
+        return str(v).strip()
 
     @property
     def is_expired(self) -> bool:
@@ -54,11 +63,11 @@ class APIKeyEntry(BaseModel):
 
     @property
     def expires_soon(self) -> bool:
-        """Returns True if expiring within 30 days."""
+        """Returns True if expiring within rotation_reminder_days days."""
         if self.expires_at is None:
             return False
         delta = self.expires_at - datetime.now(timezone.utc)
-        return 0 < delta.days <= 30
+        return 0 < delta.days <= self.rotation_reminder_days
 
     @property
     def status_label(self) -> str:
@@ -74,11 +83,12 @@ class APIKeyEntry(BaseModel):
 class WalletPayload(BaseModel):
     model_config = ConfigDict(strict=False)
 
-    version: str = "1.0"
-    master_hash: str                        # Argon2id hash string for verification
+    version: str = "1.1"
+    master_hash: str
     created_at: datetime = Field(default_factory=_now_utc)
     modified_at: datetime = Field(default_factory=_now_utc)
     keys: dict[str, APIKeyEntry] = Field(default_factory=dict)
+    integrity_hmac: Optional[str] = None   # HMAC-SHA256 manifest (Wave 2)
 
     def touch(self) -> None:
         self.modified_at = _now_utc()
@@ -88,10 +98,12 @@ class WalletPayload(BaseModel):
         self.touch()
 
     def get_entry(self, name_or_id: str) -> Optional[APIKeyEntry]:
+        """Lookup by exact ID first, then case-insensitive name match."""
         if name_or_id in self.keys:
             return self.keys[name_or_id]
+        needle = name_or_id.lower()
         for entry in self.keys.values():
-            if entry.name.lower() == name_or_id.lower():
+            if entry.name.lower() == needle:
                 return entry
         return None
 
@@ -102,15 +114,29 @@ class WalletPayload(BaseModel):
             return True
         return False
 
-    def search(self, query: str = "", tag: str = "", service: str = "") -> list[APIKeyEntry]:
+    def search(
+        self,
+        query: str = "",
+        tag: str = "",
+        service: str = "",
+    ) -> list[APIKeyEntry]:
+        """Filter entries by substring query, tag, and/or service name."""
         results = list(self.keys.values())
         if query:
             q = query.lower()
-            results = [e for e in results if q in e.name.lower() or q in e.service.lower()]
+            results = [
+                e for e in results
+                if q in e.name.lower()
+                or q in e.service.lower()
+                or any(q in t for t in e.tags)
+                or (e.description and q in e.description.lower())
+            ]
         if tag:
-            results = [e for e in results if tag.lower() in e.tags]
+            t = tag.lower()
+            results = [e for e in results if t in e.tags]
         if service:
-            results = [e for e in results if service.lower() in e.service.lower()]
+            s = service.lower()
+            results = [e for e in results if s in e.service.lower()]
         return results
 
     def to_dict(self) -> dict:

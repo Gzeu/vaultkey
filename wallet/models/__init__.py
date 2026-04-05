@@ -1,0 +1,1 @@
+"""VaultKey data models."""

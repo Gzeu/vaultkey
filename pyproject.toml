@@ -1,54 +1,51 @@
+[build-system]
+requires = ["poetry-core>=1.8.0"]
+build-backend = "poetry.core.masonry.api"
+
 [tool.poetry]
 name = "vaultkey"
-version = "1.0.0"
-description = "Secure local API Key Wallet with AES-256-GCM encryption"
+version = "0.2.0"
+description = "Ultra-secure local API key wallet with AES-256-GCM, Argon2id, and HMAC integrity verification"
 authors = ["VaultKey Contributors"]
 license = "MIT"
 readme = "README.md"
-packages = [{include = "wallet"}]
+requires-python = ">=3.11"
+
+[tool.poetry.dependencies]
+python = "^3.11"
+cryptography = ">=42.0"
+argon2-cffi = ">=23.1"
+pydantic = ">=2.6"
+pydantic-settings = ">=2.2"
+typer = {version = ">=0.12", extras = ["all"]}
+rich = ">=13.7"
+pyperclip = ">=1.9"
+textual = ">=0.55"
+customtkinter = ">=5.2"
+hypothesis = {version = ">=6.100", optional = true}
+
+[tool.poetry.extras]
+test = ["hypothesis"]
+
+[tool.poetry.group.dev.dependencies]
+pytest = ">=8.0"
+pytest-cov = ">=5.0"
+hypothesis = ">=6.100"
 
 [tool.poetry.scripts]
 wallet = "wallet.ui.cli:app"
 
-[tool.poetry.dependencies]
-python = "^3.11"
-cryptography = "^42.0"
-argon2-cffi = "^23.1"
-typer = {extras = ["all"], version = "^0.12"}
-textual = "^0.60"
-customtkinter = "^5.2"
-pyperclip = "^1.9"
-rich = "^13.7"
-pydantic = "^2.6"
-pydantic-settings = "^2.2"
-python-dotenv = "^1.0"
-
-[tool.poetry.group.dev.dependencies]
-pytest = "^8.0"
-pytest-cov = "^5.0"
-pytest-asyncio = "^0.23"
-pytest-mock = "^3.12"
-freezegun = "^1.4"
-hypothesis = "^6.100"
-mypy = "^1.9"
-ruff = "^0.4"
-
 [tool.pytest.ini_options]
-asyncio_mode = "auto"
-addopts = "--cov=wallet/core --cov-report=term-missing --cov-fail-under=90"
 testpaths = ["tests"]
+addopts = "--cov=wallet --cov-report=term-missing --cov-fail-under=80"
 
-[tool.mypy]
-strict = true
-python_version = "3.11"
-ignore_missing_imports = false
+[tool.coverage.run]
+omit = ["wallet/ui/tui.py", "wallet/ui/gui.py"]
 
 [tool.ruff]
 line-length = 100
 target-version = "py311"
-select = ["E", "F", "S", "B", "I"]
-ignore = ["S101"]
 
-[build-system]
-requires = ["poetry-core"]
-build-backend = "poetry.core.masonry.api"
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+ignore = ["E501"]

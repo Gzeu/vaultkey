@@ -1,70 +1,76 @@
 """
-clipboard.py — Secure clipboard operations with automatic clearing.
+clipboard.py — Secure clipboard operations with auto-clear.
 
-Clipboard is cleared after CLEAR_TIMEOUT_SECONDS (default: 30s) via a daemon timer.
-atexit hook ensures clipboard is cleared even on abnormal program exit.
+Design decisions:
+- pyperclip is used as the cross-platform clipboard backend.
+  It supports X11 (xclip/xsel), Wayland (wl-clipboard), macOS (pbcopy), Windows.
+- The clear timer runs in a daemon thread so it doesn't prevent process exit.
+- The clipboard is cleared by overwriting with an empty string, not by
+  killing the clipboard manager — this is more compatible across environments.
+- We deliberately do NOT store what was copied — the callback just writes "".
+- On Wayland without wl-clipboard, pyperclip will raise. We catch and warn.
 """
 
-import atexit
+import logging
 import threading
-from typing import Optional
+from typing import Callable
 
-from rich.console import Console
-
-from wallet.utils.audit import audit_log
-
-console = Console()
-CLEAR_TIMEOUT_SECONDS = 30
-
-_timer: Optional[threading.Timer] = None
+log = logging.getLogger(__name__)
 
 
-def copy_to_clipboard(value: str, key_name: str = "-", timeout: int = CLEAR_TIMEOUT_SECONDS) -> bool:
+def copy_to_clipboard(
+    value: str,
+    *,
+    key_name: str = "",
+    timeout: int = 30,
+    on_clear: Callable[[], None] | None = None,
+) -> bool:
     """
-    Copy value to clipboard and schedule automatic clearing.
-    Returns False if clipboard is unavailable (headless system).
+    Copy a value to the clipboard and schedule auto-clear.
+
+    Args:
+        value:    The string to copy (e.g., API key).
+        key_name: Display name for log messages.
+        timeout:  Seconds until clipboard is cleared.
+        on_clear: Optional callback invoked after clearing.
+
+    Returns:
+        True if copied successfully, False if clipboard unavailable.
     """
-    global _timer
     try:
         import pyperclip
         pyperclip.copy(value)
-    except Exception as exc:
-        console.print(
-            f"[yellow]⚠  Clipboard unavailable: {exc}[/yellow]\n"
-            "[dim]Use --show or --raw to retrieve the key value.[/dim]"
+        log.info(
+            "Copied '%s' to clipboard. Auto-clear in %ds.",
+            key_name or "key",
+            timeout,
         )
+    except Exception as e:  # noqa: BLE001
+        log.warning("Clipboard unavailable: %s", e)
         return False
 
-    if _timer and _timer.is_alive():
-        _timer.cancel()
+    def _clear() -> None:
+        try:
+            import pyperclip
+            pyperclip.copy("")
+            log.info("Clipboard cleared (auto, %ds timeout).", timeout)
+            if on_clear:
+                on_clear()
+        except Exception as e:  # noqa: BLE001
+            log.warning("Clipboard clear failed: %s", e)
 
-    _timer = threading.Timer(timeout, _clear_clipboard)
-    _timer.daemon = True
-    _timer.start()
-
-    console.print(
-        f"[green]✓ Copied![/green] "
-        f"[dim]Clipboard auto-clears in {timeout}s[/dim]"
-    )
-    audit_log("COPY_CLIPBOARD", key_name=key_name, status="OK")
+    timer = threading.Timer(timeout, _clear)
+    timer.daemon = True
+    timer.start()
     return True
 
 
-def _clear_clipboard() -> None:
+def clear_clipboard() -> bool:
+    """Immediately clear the clipboard. Returns True on success."""
     try:
         import pyperclip
         pyperclip.copy("")
-        console.print("\n[dim]🔒 Clipboard cleared.[/dim]")
-    except Exception:
-        pass
-
-
-def clear_now() -> None:
-    global _timer
-    if _timer and _timer.is_alive():
-        _timer.cancel()
-        _timer = None
-    _clear_clipboard()
-
-
-atexit.register(clear_now)
+        return True
+    except Exception as e:  # noqa: BLE001
+        log.warning("Clipboard clear failed: %s", e)
+        return False
