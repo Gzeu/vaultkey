@@ -1,51 +1,175 @@
 [build-system]
-requires = ["poetry-core>=1.8.0"]
-build-backend = "poetry.core.masonry.api"
+requires = ["hatchling>=1.24"]
+build-backend = "hatchling.build"
 
-[tool.poetry]
+[project]
 name = "vaultkey"
-version = "0.2.0"
+version = "1.2.0"
 description = "Ultra-secure local API key wallet with AES-256-GCM, Argon2id, and HMAC integrity verification"
-authors = ["VaultKey Contributors"]
-license = "MIT"
+authors = [{name = "VaultKey Contributors"}]
+license = {text = "MIT"}
 readme = "README.md"
 requires-python = ">=3.11"
+keywords = ["api-key", "password-manager", "encryption", "security", "cli", "aes", "argon2"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Security :: Cryptography",
+    "Topic :: Utilities",
+]
 
-[tool.poetry.dependencies]
-python = "^3.11"
-cryptography = ">=42.0"
-argon2-cffi = ">=23.1"
-pydantic = ">=2.6"
-pydantic-settings = ">=2.2"
-typer = {version = ">=0.12", extras = ["all"]}
-rich = ">=13.7"
-pyperclip = ">=1.9"
-textual = ">=0.55"
-customtkinter = ">=5.2"
-hypothesis = {version = ">=6.100", optional = true}
+dependencies = [
+    "cryptography>=42.0",
+    "argon2-cffi>=23.1",
+    "pydantic>=2.6",
+    "pydantic-settings>=2.2",
+    "typer[all]>=0.12",
+    "rich>=13.7",
+    "pyperclip>=1.9",
+    "textual>=0.55",
+    "customtkinter>=5.2",
+]
 
-[tool.poetry.extras]
-test = ["hypothesis"]
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "pytest-xdist>=3.5",
+    "hypothesis>=6.100",
+    "ruff>=0.4",
+    "mypy>=1.9",
+    "bandit[toml]>=1.7",
+    "mkdocs>=1.5",
+    "mkdocs-material>=9.5",
+    "mkdocstrings[python]>=0.24",
+]
 
-[tool.poetry.group.dev.dependencies]
-pytest = ">=8.0"
-pytest-cov = ">=5.0"
-hypothesis = ">=6.100"
-
-[tool.poetry.scripts]
+[project.scripts]
 wallet = "wallet.ui.cli:app"
+
+[project.urls]
+Homepage = "https://github.com/Gzeu/vaultkey"
+Repository = "https://github.com/Gzeu/vaultkey"
+"Bug Tracker" = "https://github.com/Gzeu/vaultkey/issues"
+Changelog = "https://github.com/Gzeu/vaultkey/blob/main/CHANGELOG.md"
+Security = "https://github.com/Gzeu/vaultkey/blob/main/SECURITY.md"
+
+# ------------------------------------------------------------------ #
+# Hatch
+# ------------------------------------------------------------------ #
+
+[tool.hatch.build.targets.wheel]
+packages = ["wallet"]
+
+[tool.hatch.version]
+path = "wallet/__init__.py"
+
+# ------------------------------------------------------------------ #
+# pytest
+# ------------------------------------------------------------------ #
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "--cov=wallet --cov-report=term-missing --cov-fail-under=80"
+addopts = [
+    "--cov=wallet",
+    "--cov-report=term-missing",
+    "--cov-report=xml",
+    "--cov-fail-under=80",
+    "--tb=short",
+    "-q",
+]
 
 [tool.coverage.run]
-omit = ["wallet/ui/tui.py", "wallet/ui/gui.py"]
+omit = [
+    "wallet/ui/tui.py",
+    "wallet/ui/gui.py",
+    "tests/*",
+]
+branch = true
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "\\.\.\\.",
+]
+
+# ------------------------------------------------------------------ #
+# Ruff (linter + formatter)
+# ------------------------------------------------------------------ #
 
 [tool.ruff]
 line-length = 100
 target-version = "py311"
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
-ignore = ["E501"]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "UP",  # pyupgrade
+    "B",   # flake8-bugbear
+    "SIM", # flake8-simplify
+    "RUF", # ruff-specific
+    "S",   # bandit (security subset)
+    "ANN", # type annotations (warnings only)
+    "BLE", # blind except
+]
+ignore = [
+    "E501",   # line too long (handled by formatter)
+    "S101",   # assert usage (used intentionally in crypto.py)
+    "ANN101", # self annotation
+    "ANN102", # cls annotation
+    "ANN401", # Any type
+    "BLE001", # blind except (used intentionally in UI code)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S", "ANN"]  # Security checks and type annotations not required in tests
+"wallet/ui/*" = ["ANN"]   # UI code type annotation warnings suppressed
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+# ------------------------------------------------------------------ #
+# mypy
+# ------------------------------------------------------------------ #
+
+[tool.mypy]
+python_version = "3.11"
+strict = false
+warn_return_any = true
+warn_unused_configs = true
+warn_unused_ignores = true
+no_implicit_reexport = true
+ignore_missing_imports = true
+exclude = ["tests/", "wallet/ui/"]
+
+# ------------------------------------------------------------------ #
+# bandit (security)
+# ------------------------------------------------------------------ #
+
+[tool.bandit]
+exclude_dirs = ["tests", ".venv", ".github"]
+skips = [
+    "B101",  # assert_used — intentional in crypto.py
+    "B603",  # subprocess_without_shell_equals_true — not used
+    "B607",  # start_process_with_partial_path — not used
+]
+
+# ------------------------------------------------------------------ #
+# Hypothesis settings
+# ------------------------------------------------------------------ #
+
+[tool.hypothesis]
+suppress_health_check = ["too_slow"]
+deadline = 5000

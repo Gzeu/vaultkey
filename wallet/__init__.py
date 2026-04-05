@@ -1,2 +1,5 @@
-"""VaultKey — Secure API Key Wallet."""
-__version__ = "1.0.0"
+"""VaultKey — Ultra-secure local API key wallet."""
+
+__version__ = "1.2.0"
+__author__ = "VaultKey Contributors"
+__license__ = "MIT"

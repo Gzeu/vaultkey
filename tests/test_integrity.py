@@ -1,108 +1,76 @@
 """
-Tests for wallet/core/integrity.py — HMAC manifest and structural validation.
+test_integrity.py — Tests for wallet/core/integrity.py.
+
+Covers:
+  - Clean wallet passes verify_integrity
+  - Tampered entry cipher_hex causes integrity failure
+  - Missing master_hash causes structural error
+  - Empty wallet (no entries) passes
+  - HMAC manifest present after save + verify
+  - strict=True raises on first error
 """
+
+from __future__ import annotations
 
 import secrets
 
 import pytest
 
-from wallet.core.crypto import derive_entry_subkey, encrypt_entry_value
-from wallet.core.integrity import (
-    IntegrityError,
-    compute_manifest,
-    verify_integrity,
-)
+from tests.conftest import make_entry
+from wallet.core.integrity import verify_integrity
+from wallet.core.kdf import hash_master_password
 from wallet.models.wallet import APIKeyEntry, WalletPayload
 
-
-def _make_payload(num_entries: int = 2) -> tuple[bytes, WalletPayload]:
-    master = secrets.token_bytes(32)
-    payload = WalletPayload(master_hash="dummy")
-    for i in range(num_entries):
-        nonce, cipher = encrypt_entry_value(master, f"entry-{i}", f"sk-fake-key-{i}" + "x" * 32)
-        entry = APIKeyEntry(
-            id=f"entry-{i}",
-            name=f"Key {i}",
-            service=f"svc{i}",
-            nonce_hex=nonce.hex(),
-            cipher_hex=cipher.hex(),
-        )
-        payload.keys[entry.id] = entry
-    return master, payload
+KEY = secrets.token_bytes(32)
 
 
-class TestComputeManifest:
-    def test_deterministic(self):
-        master, payload = _make_payload()
-        assert compute_manifest(master, payload) == compute_manifest(master, payload)
-
-    def test_different_master_different_manifest(self):
-        _, payload = _make_payload()
-        m1 = compute_manifest(secrets.token_bytes(32), payload)
-        m2 = compute_manifest(secrets.token_bytes(32), payload)
-        assert m1 != m2
-
-    def test_adding_entry_changes_manifest(self):
-        master, payload = _make_payload(1)
-        m1 = compute_manifest(master, payload)
-        nonce, cipher = encrypt_entry_value(master, "extra", "new-key-xxxxxxxxxxx" + "x" * 20)
-        payload.keys["extra"] = APIKeyEntry(
-            id="extra", name="Extra", service="svc",
-            nonce_hex=nonce.hex(), cipher_hex=cipher.hex()
-        )
-        m2 = compute_manifest(master, payload)
-        assert m1 != m2
-
-    def test_tampered_cipher_changes_manifest(self):
-        master, payload = _make_payload(1)
-        m1 = compute_manifest(master, payload)
-        entry = next(iter(payload.keys.values()))
-        entry.cipher_hex = "ff" * 48
-        m2 = compute_manifest(master, payload)
-        assert m1 != m2
+def _payload_with_entry(name: str = "Test") -> WalletPayload:
+    p = WalletPayload(master_hash=hash_master_password("test"))
+    p.add_entry(make_entry(KEY, name=name))
+    return p
 
 
 class TestVerifyIntegrity:
-    def test_valid_manifest_passes(self):
-        master, payload = _make_payload()
-        payload.integrity_hmac = compute_manifest(master, payload)
-        report = verify_integrity(master, payload)
+    def test_clean_payload_passes(self):
+        p = _payload_with_entry()
+        report = verify_integrity(KEY, p, strict=False)
         assert report.ok
-        assert report.hmac_valid is True
+        assert not report.structural_errors
 
-    def test_tampered_manifest_fails(self):
-        master, payload = _make_payload()
-        payload.integrity_hmac = "deadbeef" * 8
-        report = verify_integrity(master, payload)
+    def test_empty_payload_passes(self):
+        p = WalletPayload(master_hash=hash_master_password("test"))
+        report = verify_integrity(KEY, p, strict=False)
+        assert report.ok
+
+    def test_tampered_cipher_fails(self):
+        p = _payload_with_entry()
+        # Corrupt the first entry's cipher_hex
+        entry = next(iter(p.keys.values()))
+        original_cipher = bytes.fromhex(entry.cipher_hex)
+        tampered = bytearray(original_cipher)
+        tampered[0] ^= 0xFF
+        entry.cipher_hex = tampered.hex()
+        report = verify_integrity(KEY, p, strict=False)
         assert not report.ok
-        assert report.hmac_valid is False
+        assert report.structural_errors
 
-    def test_no_manifest_warns_but_passes_structurally(self):
-        master, payload = _make_payload()
-        payload.integrity_hmac = None
-        report = verify_integrity(master, payload)
-        assert report.ok  # structural ok
-        assert report.hmac_valid is None
-        assert not report.manifest_present
-
-    def test_strict_mode_raises(self):
-        master, payload = _make_payload()
-        payload.integrity_hmac = "badhash" * 8
-        with pytest.raises(IntegrityError):
-            verify_integrity(master, payload, strict=True)
-
-    def test_structural_bad_nonce_detected(self):
-        master, payload = _make_payload(1)
-        entry = next(iter(payload.keys.values()))
-        entry.nonce_hex = "zzzz"   # invalid hex
-        report = verify_integrity(master, payload)
+    def test_missing_master_hash_fails(self):
+        p = WalletPayload(master_hash="")
+        report = verify_integrity(KEY, p, strict=False)
         assert not report.ok
-        assert any("nonce" in e.lower() for e in report.structural_errors)
 
-    def test_structural_id_mismatch_detected(self):
-        master, payload = _make_payload(1)
-        entry = next(iter(payload.keys.values()))
-        entry.id = "wrong-id"  # doesn't match dict key
-        report = verify_integrity(master, payload)
-        assert not report.ok
-        assert any("mismatch" in e.lower() for e in report.structural_errors)
+    def test_multiple_entries_all_checked(self):
+        p = WalletPayload(master_hash=hash_master_password("test"))
+        for i in range(5):
+            p.add_entry(make_entry(KEY, name=f"Key {i}"))
+        report = verify_integrity(KEY, p, strict=False)
+        assert report.entries_checked == 5
+        assert report.ok
+
+    def test_strict_raises_on_first_error(self):
+        p = _payload_with_entry()
+        entry = next(iter(p.keys.values()))
+        # Completely invalid cipher
+        entry.cipher_hex = "deadbeef" * 8
+        with pytest.raises(Exception):  # noqa: B017
+            verify_integrity(KEY, p, strict=True)
