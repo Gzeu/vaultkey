@@ -1,5 +1,5 @@
 """
-cli.py — Typer-based CLI for VaultKey (Wave 3: health, audit, verify, wipe, completion).
+cli.py — Typer-based CLI for VaultKey.
 
 All commands require an unlocked session except: init, unlock, status, verify.
 Sensitive input (master password, API key value) always prompted with echo=False.
@@ -12,6 +12,11 @@ Wave 3 additions:
   - `wallet search`   — fuzzy search alias (delegates to list)
   - `wallet tag`      — add/remove tags without touching crypto
   - All commands emit audit_log() events consistently.
+
+Wave 6 additions:
+  - `wallet duplicate <name>` — clone an entry under a new ID + new nonce.
+    Zero re-encryption cost: decrypts once, encrypts once under a fresh UUID.
+    Useful for staging vs. prod keys that share the same service.
 """
 
 import json
@@ -170,9 +175,11 @@ def unlock() -> None:
         raise typer.Exit(1)
 
     session.unlock(key)
+    info = session.info
     console.print(
         f"[green]✓ Unlocked.[/green] "
-        f"[dim]Auto-locks in {cfg.session_timeout_minutes} min.[/dim]"
+        f"[dim]Auto-locks in {cfg.session_timeout_minutes} min "
+        f"({info.get('seconds_until_lock', '')}s remaining).[/dim]"
     )
 
 
@@ -194,6 +201,12 @@ def status() -> None:
         expiring = sum(1 for e in payload.keys.values() if e.expires_soon)
         expired = sum(1 for e in payload.keys.values() if e.is_expired)
         revoked = sum(1 for e in payload.keys.values() if not e.is_active)
+        secs = info.get("seconds_until_lock")
+        timeout_str = (
+            f"{info['timeout_minutes']} min ({secs}s remaining)"
+            if secs is not None
+            else f"{info['timeout_minutes']} min"
+        )
         lines = [
             f"[green]✓ Unlocked[/green]",
             f"Total keys:  {len(payload.keys)}",
@@ -203,7 +216,7 @@ def status() -> None:
             f"Revoked:     [dim]{revoked}[/dim]",
             f"Unlocked at: {info['unlocked_at']}",
             f"Last action: {info['last_activity']}",
-            f"Timeout:     {info['timeout_minutes']} min",
+            f"Timeout:     {timeout_str}",
         ]
         console.print(Panel("\n".join(lines), title="🔐 VaultKey Status", expand=False))
     else:
@@ -441,6 +454,84 @@ def rotate(name: str = typer.Argument(...)) -> None:
 
 
 @app.command()
+def duplicate(
+    name: str = typer.Argument(..., help="Name of the entry to clone"),
+    new_name: Optional[str] = typer.Option(None, "--as", "-n", help="Name for the new entry"),
+) -> None:
+    """Clone an entry under a new UUID and fresh nonce.
+
+    Decrypts the source entry once, re-encrypts under a brand-new entry ID
+    (which changes the HKDF subkey domain) with a fresh random nonce.
+    The cloned entry inherits all metadata (service, tags, description,
+    expiry) but starts with access_count=0 and a new created_at timestamp.
+
+    Useful for maintaining separate staging and production keys for the
+    same service without re-entering the key value.
+
+    Example:
+        wallet duplicate "OpenAI Production" --as "OpenAI Staging"
+    """
+    key = _require_unlocked()
+    payload = _load_payload(key)
+    params = storage.read_kdf_params()
+
+    source = payload.get_entry(name)
+    if not source:
+        console.print(f"[red]❌ Key '{name}' not found.[/red]")
+        raise typer.Exit(1)
+
+    # Determine new name
+    if not new_name:
+        suggested = f"{source.name} (copy)"
+        new_name = validate_key_name(
+            Prompt.ask("New entry name", default=suggested)
+        )
+    else:
+        new_name = validate_key_name(new_name)
+
+    if payload.get_entry(new_name):
+        console.print(f"[red]❌ An entry named '{new_name}' already exists.[/red]")
+        raise typer.Exit(1)
+
+    # Decrypt the source value
+    raw_value = decrypt_entry_value(
+        key,
+        source.id,
+        bytes.fromhex(source.nonce_hex),
+        bytes.fromhex(source.cipher_hex),
+    )
+
+    # Re-encrypt under a new UUID — new UUID ⇒ new HKDF subkey domain
+    new_id = str(uuid.uuid4())
+    new_nonce, new_cipher = encrypt_entry_value(key, new_id, raw_value)
+
+    clone = APIKeyEntry(
+        id=new_id,
+        name=new_name,
+        service=source.service,
+        nonce_hex=new_nonce.hex(),
+        cipher_hex=new_cipher.hex(),
+        prefix=source.prefix,
+        description=source.description,
+        tags=",".join(source.tags) if source.tags else "",
+        expires_at=source.expires_at,
+        created_at=datetime.now(timezone.utc),
+        is_active=source.is_active,
+        rotation_days=source.rotation_days,
+    )
+
+    payload.add_entry(clone)
+    _save_payload(payload, key, params)
+    audit_log("DUPLICATE", key_name=new_name, status="OK",
+              extra=f"source={source.name}")
+    console.print(
+        f"[green]✓ Duplicated:[/green] "
+        f"[bold]{source.name}[/bold] → [bold]{new_name}[/bold] "
+        f"[dim](new ID: {new_id[:8]}…)[/dim]"
+    )
+
+
+@app.command()
 def tag(
     name: str = typer.Argument(..., help="Key name or ID"),
     add_tags: Optional[str] = typer.Option(None, "--add", help="Comma-separated tags to add"),
@@ -458,7 +549,7 @@ def tag(
 
     if add_tags:
         new = [t.strip().lower() for t in add_tags.split(",") if t.strip()]
-        entry.tags = list(dict.fromkeys(entry.tags + new))  # preserve order, dedupe
+        entry.tags = list(dict.fromkeys(entry.tags + new))
     if remove_tags:
         rm = {t.strip().lower() for t in remove_tags.split(",")}
         entry.tags = [t for t in entry.tags if t not in rm]
@@ -471,7 +562,6 @@ def tag(
 @app.command()
 def search(query: str = typer.Argument(...)) -> None:
     """Fuzzy search across name, service, tags, and description."""
-    # Delegate to list_keys with the query argument
     key = _require_unlocked()
     payload = _load_payload(key)
     results = payload.search(query=query)
@@ -571,7 +661,6 @@ def audit(
     for ev in events:
         status = ev.get("status", "")
         sc = "green" if status == "OK" else "red"
-        # Trim ISO timestamp for readability
         ts = ev.get("ts", "")[:19].replace("T", " ")
         table.add_row(
             ts,
@@ -593,7 +682,6 @@ def verify() -> None:
         console.print("[red]❌ No wallet found. Run: wallet init[/red]")
         raise typer.Exit(1)
 
-    # verify needs the master key — require unlock
     key = _require_unlocked()
     payload = _load_payload(key)
 
