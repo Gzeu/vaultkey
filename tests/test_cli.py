@@ -27,7 +27,7 @@ def reset_session():
 def initialized_wallet(tmp_path, monkeypatch):
     """Create an initialized wallet in a temp directory."""
     monkeypatch.chdir(tmp_path)
-    result = runner.invoke(app, ["init"], input="testpass123\ntestpass123\n")
+    result = runner.invoke(app, ["init"], input="testpass123\ntestpass123\ny\n")
     assert result.exit_code == 0
     return tmp_path
 
@@ -35,7 +35,7 @@ def initialized_wallet(tmp_path, monkeypatch):
 class TestInitCommand:
     def test_init_creates_wallet(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
-        result = runner.invoke(app, ["init"], input="mypassword\nmypassword\n")
+        result = runner.invoke(app, ["init"], input="mypassword\nmypassword\ny\n")
         assert result.exit_code == 0
         assert (tmp_path / "wallet.enc").exists()
 
