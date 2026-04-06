@@ -20,12 +20,19 @@ SECURITY FIXES v1.1:
   FIX #3 (MODERATE): _check_lockout() now emits LOCKOUT_RESET audit event
     when the hard-lockout window expires and the counter is reset.
     Previously the reset was silent — no trace in audit.log.
+
+FIXES v1.2 (Wave 6):
+  FIX #7: All datetime.now() calls replaced with datetime.now(timezone.utc).
+    Naive datetimes are ambiguous on DST-transition systems and cause
+    incorrect timeout calculations in non-UTC timezones.
+  IMPROVEMENT: info property now exposes seconds_until_unlock so TUI/GUI
+    can display a live countdown without re-implementing the timeout logic.
 """
 
 import ctypes
 import threading
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from wallet.utils.audit import audit_log
@@ -83,8 +90,8 @@ class SessionManager:
         """Store the derived key and start the inactivity timer."""
         with self._op_lock:
             self._derived_key = bytearray(derived_key)
-            self._unlocked_at = datetime.now()
-            self._last_activity = datetime.now()
+            self._unlocked_at = datetime.now(timezone.utc)   # FIX #7
+            self._last_activity = datetime.now(timezone.utc)  # FIX #7
             self._failed_attempts = 0
             self._last_failed_at = None
             self._reset_timer()
@@ -123,15 +130,7 @@ class SessionManager:
         """
         Increment failure counter and apply exponential backoff delay.
 
-        ⚠️  CRITICAL: sleep() is called OUTSIDE _op_lock.
-
-        Reason: holding _op_lock during sleep would block every other thread
-        (get_key, lock, unlock) for the full sleep duration — functional deadlock.
-
-        Flow:
-          1. Acquire lock → read/update state → release lock
-          2. Sleep WITHOUT lock
-          3. Raise TooManyAttemptsException if threshold reached
+        CRITICAL: sleep() is called OUTSIDE _op_lock.
         """
         hard_lockout = False
         delay_seconds: float = 0.0
@@ -139,7 +138,7 @@ class SessionManager:
 
         with self._op_lock:
             self._failed_attempts += 1
-            self._last_failed_at = datetime.now()
+            self._last_failed_at = datetime.now(timezone.utc)  # FIX #7
             attempt_num = self._failed_attempts
             if self._failed_attempts >= MAX_FAILED_ATTEMPTS:
                 hard_lockout = True
@@ -154,7 +153,7 @@ class SessionManager:
             status="FAIL",
         )
 
-        # ── Sleep OUTSIDE lock ───────────────────────────────────────────────
+        # Sleep OUTSIDE lock
         if hard_lockout:
             time.sleep(HARD_LOCKOUT_SECONDS)
             raise TooManyAttemptsException(wait_seconds=HARD_LOCKOUT_SECONDS)
@@ -169,6 +168,15 @@ class SessionManager:
 
     @property
     def info(self) -> dict:
+        """Session metadata. seconds_until_unlock is useful for TUI/GUI countdowns."""
+        seconds_until_lock: int | None = None
+        if self._last_activity is not None and not self._is_timed_out():
+            elapsed = (
+                datetime.now(timezone.utc) - self._last_activity
+            ).total_seconds()
+            seconds_until_lock = max(
+                0, int(SESSION_TIMEOUT_MINUTES * 60 - elapsed)
+            )
         return {
             "unlocked": self.is_unlocked,
             "unlocked_at": (
@@ -179,6 +187,7 @@ class SessionManager:
             ),
             "timeout_minutes": SESSION_TIMEOUT_MINUTES,
             "failed_attempts": self._failed_attempts,
+            "seconds_until_lock": seconds_until_lock,
         }
 
     # ------------------------------------------------------------------ #
@@ -215,13 +224,13 @@ class SessionManager:
 
     def _touch(self) -> None:
         """Update last-activity timestamp and restart the idle timer."""
-        self._last_activity = datetime.now()
+        self._last_activity = datetime.now(timezone.utc)  # FIX #7
         self._reset_timer()
 
     def _is_timed_out(self) -> bool:
         if self._last_activity is None:
             return True
-        return datetime.now() - self._last_activity > timedelta(
+        return datetime.now(timezone.utc) - self._last_activity > timedelta(
             minutes=SESSION_TIMEOUT_MINUTES
         )
 
@@ -231,13 +240,14 @@ class SessionManager:
 
         If the hard-lockout window is active: raise TooManyAttemptsException immediately.
         When window expires: reset counter and emit LOCKOUT_RESET audit event.
-        (FIX #3: previously the reset was silent — no audit entry was written.)
         """
         if (
             self._failed_attempts >= MAX_FAILED_ATTEMPTS
             and self._last_failed_at is not None
         ):
-            elapsed = (datetime.now() - self._last_failed_at).total_seconds()
+            elapsed = (
+                datetime.now(timezone.utc) - self._last_failed_at  # FIX #7
+            ).total_seconds()
             remaining = int(max(0.0, HARD_LOCKOUT_SECONDS - elapsed))
             if remaining > 0:
                 raise TooManyAttemptsException(wait_seconds=remaining)

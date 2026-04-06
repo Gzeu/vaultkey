@@ -14,6 +14,9 @@ Design decisions:
 - Manifest is stored in WalletPayload.integrity_hmac (added to model this wave).
 - On every load(), integrity is checked automatically if the field is present.
   If absent (old wallet), a WARNING is emitted and the manifest is written on next save().
+
+FIX (Wave 6):
+  - compute_manifest: replaced hmac.new() with hmac.HMAC() — explicit, modern API.
 """
 
 import hashlib
@@ -62,7 +65,8 @@ def compute_manifest(master_key: bytes, payload: "WalletPayload") -> str:
       AES-GCM ciphertext, so they're already AEAD-protected.
     """
     subkey = derive_entry_subkey(master_key, MANIFEST_ENTRY_ID)
-    mac = hmac.new(subkey, digestmod=hashlib.sha256)
+    # FIX: use hmac.HMAC() instead of deprecated hmac.new()
+    mac = hmac.HMAC(subkey, digestmod=hashlib.sha256)
     # Sort by entry_id for determinism
     for entry_id in sorted(payload.keys):
         entry = payload.keys[entry_id]

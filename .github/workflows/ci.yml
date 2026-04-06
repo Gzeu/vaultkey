@@ -79,8 +79,23 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Verify CHANGELOG and SECURITY exist
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install MkDocs
+        run: pip install mkdocs-material mkdocstrings[python]
+
+      - name: Verify required docs exist
         run: |
           test -f CHANGELOG.md
           test -f SECURITY.md
-          echo "✓ Required docs present"
+          echo "OK: required docs present"
+
+      - name: Build MkDocs site (strict)
+        run: mkdocs build --strict
+        # --strict: warnings become errors — broken links, missing docstrings,
+        # undefined nav entries all fail the CI run rather than silently passing.

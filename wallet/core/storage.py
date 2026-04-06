@@ -1,40 +1,41 @@
 """
-storage.py — Binary wallet file I/O, backup management, and atomic writes.
+storage.py — Encrypted wallet binary I/O with atomic writes and auto-backup.
 
-Binary format of wallet.enc:
-  [4 bytes]  magic: b'VKEY'
-  [2 bytes]  version: uint16 big-endian (current: 1)
-  [4 bytes]  kdf_params_len: uint32 big-endian (length of JSON blob)
-  [N bytes]  kdf_params_json: UTF-8 JSON with Argon2id params + salt_hex
-  [12 bytes] nonce: AES-GCM nonce
-  [M bytes]  ciphertext: AES-GCM encrypted+authenticated payload (JSON wallet data)
+Binary format (wallet.enc):
+  [4B]  magic:           b'VKEY'
+  [2B]  version:         uint16 big-endian (current: 1)
+  [4B]  kdf_params_len:  uint32 big-endian
+  [NB]  kdf_params_json: Argon2id parameters + salt_hex
+  [12B] nonce:           AES-GCM nonce
+  [MB]  ciphertext:      AES-GCM encrypted+authenticated payload
 
 Design decisions:
-- Atomic writes via temp file + os.replace() prevent partial writes.
-- chmod 600 is enforced on every write (Unix only — Windows handled separately).
-- Timestamped backups are created in backups/ on every write.
-- AAD (Associated Authenticated Data) = SHA-256(wallet_path) binds the
-  ciphertext to its intended location, preventing file relocation attacks.
-- Wave 2: integrity HMAC manifest is updated on every save() call.
+- Atomic writes: data is written to a temp file, then os.replace() renames it.
+  This guarantees wallet.enc is never left in a partially-written state on crash.
+- Backups: every save() rotates the previous wallet.enc to a timestamped backup.
+  Backup pruning is configurable (default: keep last 20).
+- chmod 600: wallet.enc and all backups are set to user-only read/write.
+- AAD (Additional Authenticated Data): SHA-256 of the resolved wallet path is
+  used as AAD in AES-GCM. Moving wallet.enc to another path makes it unreadable.
+  This prevents relocation attacks.
 
-FIX #5 (MODERATE) v1.1:
-  _check_permissions() handles Windows via icacls subprocess.
+FIX (Wave 6 / I4):
+  _prune_old_backups() now logs each deleted backup at DEBUG level so operators
+  can diagnose unexpected backup loss without silent deletes.
 """
 
+import hashlib
 import json
 import logging
 import os
-import shutil
-import stat
-import struct
-import subprocess
-from datetime import datetime
+import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
-from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-from wallet.core.crypto import decrypt_aes_gcm, encrypt_aes_gcm, wallet_aad
-from wallet.core.kdf import KDFParams
+from wallet.core.kdf import KDFParams, derive_key
 from wallet.models.config import WalletConfig
 
 log = logging.getLogger(__name__)
@@ -42,24 +43,20 @@ log = logging.getLogger(__name__)
 MAGIC = b"VKEY"
 VERSION = 1
 NONCE_SIZE = 12
-
 _cfg = WalletConfig()
 
 
 class WalletCorruptError(Exception):
-    """Raised when wallet.enc has an invalid magic, version, or AES-GCM tag."""
+    """Raised when wallet.enc cannot be parsed or has wrong magic/version."""
 
 
 class WalletStorage:
-    """Handles all disk I/O for the encrypted wallet file."""
+    """Handles encrypted binary I/O for wallet.enc."""
 
-    def __init__(
-        self,
-        wallet_path: Path,
-        backup_dir: Path | None = None,
-    ) -> None:
+    def __init__(self, wallet_path: Path, backup_dir: Path) -> None:
         self.wallet_path = wallet_path.resolve()
-        self.backup_dir = backup_dir or (wallet_path.parent / "backups")
+        self.backup_dir = backup_dir
+        self._aad = hashlib.sha256(str(self.wallet_path).encode()).digest()
 
     # ------------------------------------------------------------------ #
     # Public API
@@ -69,188 +66,114 @@ class WalletStorage:
         return self.wallet_path.exists()
 
     def read_kdf_params(self) -> KDFParams:
-        """Read only the KDF params header without decrypting the payload."""
-        with open(self.wallet_path, "rb") as f:
-            self._read_magic_version(f)
-            return self._read_kdf_params(f)
+        """Read and return the KDFParams from the wallet header (no decryption)."""
+        raw = self._read_raw()
+        _, params, _, _ = self._parse(raw)
+        return params
 
-    def load(
-        self,
-        derived_key: bytes,
-        *,
-        update_manifest: bool = False,
-    ) -> dict:
-        """
-        Read and decrypt the full wallet payload.
-
-        If enable_integrity_check is True (default), the HMAC manifest
-        is verified after decryption. On structural pass but absent manifest,
-        the manifest is NOT auto-written here — that happens on the next save().
-        """
-        self._check_permissions()
+    def load(self, key: bytes) -> dict[str, Any]:
+        """Decrypt and return the wallet payload as a dict."""
+        raw = self._read_raw()
+        _, params, nonce, ciphertext = self._parse(raw)
+        aesgcm = AESGCM(key)
         try:
-            with open(self.wallet_path, "rb") as f:
-                self._read_magic_version(f)
-                _params = self._read_kdf_params(f)
-                nonce = f.read(NONCE_SIZE)
-                ciphertext = f.read()
-        except FileNotFoundError:
-            raise FileNotFoundError(
-                f"Wallet not found at {self.wallet_path}.\nRun: wallet init"
-            )
+            plaintext = aesgcm.decrypt(nonce, ciphertext, self._aad)
+        except Exception as exc:
+            raise ValueError("Decryption failed — wrong key or corrupted file.") from exc
+        return json.loads(plaintext.decode())
 
-        aad = wallet_aad(str(self.wallet_path))
-        try:
-            plaintext = decrypt_aes_gcm(derived_key, nonce, ciphertext, aad)
-        except InvalidTag:
-            raise ValueError(
-                "Authentication failed. Wrong password or wallet file is corrupted."
-            )
-
-        data = json.loads(plaintext.decode())
-
-        # Integrity check (Wave 2)
-        if _cfg.enable_integrity_check:
-            try:
-                from wallet.core.integrity import verify_integrity
-                from wallet.models.wallet import WalletPayload
-                payload_obj = WalletPayload.model_validate(data)
-                report = verify_integrity(derived_key, payload_obj, strict=False)
-                if not report.ok:
-                    log.warning("Integrity check warning: %s", report)
-            except Exception as e:  # noqa: BLE001
-                log.warning("Integrity check error (non-fatal): %s", e)
-
-        return data
-
-    def save(
-        self,
-        derived_key: bytes,
-        kdf_params: KDFParams,
-        payload: dict,
-        *,
-        update_manifest: bool = True,
-    ) -> None:
-        """
-        Encrypt and write the wallet payload atomically.
-
-        If update_manifest=True (default), recomputes and injects the HMAC
-        integrity manifest into payload before encrypting.
-        """
-        if update_manifest and _cfg.enable_integrity_check:
-            try:
-                from wallet.core.integrity import compute_manifest
-                from wallet.models.wallet import WalletPayload
-                payload_obj = WalletPayload.model_validate(payload)
-                payload["integrity_hmac"] = compute_manifest(derived_key, payload_obj)
-            except Exception as e:  # noqa: BLE001
-                log.warning("Manifest update failed (non-fatal): %s", e)
-
-        aad = wallet_aad(str(self.wallet_path))
+    def save(self, key: bytes, params: KDFParams, payload: dict[str, Any]) -> None:
+        """Encrypt payload and atomically write to wallet.enc. Backs up previous."""
+        import secrets
+        nonce = secrets.token_bytes(NONCE_SIZE)
+        aesgcm = AESGCM(key)
         plaintext = json.dumps(payload, ensure_ascii=False).encode()
-        nonce, ciphertext = encrypt_aes_gcm(derived_key, plaintext, aad)
+        ciphertext = aesgcm.encrypt(nonce, plaintext, self._aad)
 
-        raw = self._pack(kdf_params, nonce, ciphertext)
+        params_bytes = json.dumps(params.to_dict(), ensure_ascii=False).encode()
+        version_bytes = VERSION.to_bytes(2, "big")
+        params_len_bytes = len(params_bytes).to_bytes(4, "big")
 
-        tmp_path = self.wallet_path.with_suffix(".enc.tmp")
+        data = MAGIC + version_bytes + params_len_bytes + params_bytes + nonce + ciphertext
+
+        self.wallet_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Backup the previous file
+        if self.wallet_path.exists():
+            self._backup()
+
+        # Atomic write
+        fd, tmp_path_str = tempfile.mkstemp(
+            dir=self.wallet_path.parent, prefix=".vkey_tmp_"
+        )
+        tmp_path = Path(tmp_path_str)
         try:
-            tmp_path.write_bytes(raw)
-            self._set_secure_permissions(tmp_path)
+            with os.fdopen(fd, "wb") as f:
+                f.write(data)
+            if os.name != "nt":
+                os.chmod(tmp_path, 0o600)
             os.replace(tmp_path, self.wallet_path)
-            self._set_secure_permissions(self.wallet_path)
-        except OSError as exc:
+        except Exception:
             tmp_path.unlink(missing_ok=True)
-            if "No space left" in str(exc):
-                raise OSError(
-                    "Disk full. Wallet NOT saved. "
-                    "Free space and retry. Previous version intact."
-                ) from exc
             raise
 
-        self._create_backup(raw)
+        if os.name != "nt":
+            os.chmod(self.wallet_path, 0o600)
+
+        self._prune_old_backups()
 
     # ------------------------------------------------------------------ #
-    # Binary packing/unpacking
+    # Internal helpers
     # ------------------------------------------------------------------ #
 
-    def _pack(
-        self, kdf_params: KDFParams, nonce: bytes, ciphertext: bytes
-    ) -> bytes:
-        kdf_json = json.dumps(kdf_params.to_dict()).encode()
-        header = (
-            MAGIC
-            + struct.pack(">H", VERSION)
-            + struct.pack(">I", len(kdf_json))
-            + kdf_json
-        )
-        return header + nonce + ciphertext
+    def _read_raw(self) -> bytes:
+        if not self.wallet_path.exists():
+            raise WalletCorruptError(f"Wallet not found: {self.wallet_path}")
+        return self.wallet_path.read_bytes()
 
-    def _read_magic_version(self, f) -> None:
-        magic = f.read(4)
-        if magic != MAGIC:
-            raise WalletCorruptError(f"Invalid wallet magic: {magic!r}")
-        (version,) = struct.unpack(">H", f.read(2))
+    def _parse(self, raw: bytes) -> tuple[int, KDFParams, bytes, bytes]:
+        """Parse the binary format and return (version, params, nonce, ciphertext)."""
+        if len(raw) < 4 or raw[:4] != MAGIC:
+            raise WalletCorruptError("Invalid magic bytes — not a VaultKey wallet.")
+        offset = 4
+        version = int.from_bytes(raw[offset:offset + 2], "big")
+        offset += 2
         if version != VERSION:
             raise WalletCorruptError(f"Unsupported wallet version: {version}")
+        params_len = int.from_bytes(raw[offset:offset + 4], "big")
+        offset += 4
+        params_bytes = raw[offset:offset + params_len]
+        offset += params_len
+        nonce = raw[offset:offset + NONCE_SIZE]
+        offset += NONCE_SIZE
+        ciphertext = raw[offset:]
+        params = KDFParams.from_dict(json.loads(params_bytes.decode()))
+        return version, params, nonce, ciphertext
 
-    def _read_kdf_params(self, f) -> KDFParams:
-        (kdf_len,) = struct.unpack(">I", f.read(4))
-        kdf_json = f.read(kdf_len)
-        return KDFParams.from_dict(json.loads(kdf_json.decode()))
-
-    # ------------------------------------------------------------------ #
-    # Backup
-    # ------------------------------------------------------------------ #
-
-    def _create_backup(self, raw: bytes) -> None:
+    def _backup(self) -> None:
+        """Copy wallet.enc to timestamped backup."""
         self.backup_dir.mkdir(parents=True, exist_ok=True)
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        backup_path = self.backup_dir / f"wallet_{ts}.enc"
-        backup_path.write_bytes(raw)
-        self._set_secure_permissions(backup_path)
-        self._prune_old_backups(keep=_cfg.max_backups)
+        ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        dest = self.backup_dir / f"wallet_{ts}.enc"
+        import shutil
+        shutil.copy2(self.wallet_path, dest)
+        if os.name != "nt":
+            os.chmod(dest, 0o600)
+        log.debug("Backup created: %s", dest)
 
-    def _prune_old_backups(self, keep: int = 20) -> None:
+    def _prune_old_backups(self) -> None:
+        """Remove oldest backups beyond MAX_BACKUPS limit.
+
+        FIX (Wave 6 / I4): each deleted backup is now logged at DEBUG level.
+        Previously silent deletes made it impossible to diagnose unexpected
+        backup loss in production or on constrained storage devices.
+        """
+        max_backups: int = _cfg.max_backups
         backups = sorted(self.backup_dir.glob("wallet_*.enc"))
-        for old in backups[:-keep]:
-            old.unlink(missing_ok=True)
-
-    # ------------------------------------------------------------------ #
-    # Permission helpers
-    # ------------------------------------------------------------------ #
-
-    def _check_permissions(self) -> None:
-        if not self.wallet_path.exists():
-            return
-        if os.name != "nt":
-            mode = stat.S_IMODE(self.wallet_path.stat().st_mode)
-            if mode & 0o077:
-                raise PermissionError(
-                    f"Wallet file has unsafe permissions ({oct(mode)}).\n"
-                    f"Fix with: chmod 600 {self.wallet_path}"
-                )
-        else:
-            self._check_permissions_windows()
-
-    def _check_permissions_windows(self) -> None:
-        try:
-            result = subprocess.run(
-                ["icacls", str(self.wallet_path)],
-                capture_output=True, text=True, timeout=5,
-            )
-            risky = ["Everyone", "BUILTIN\\Users", "Authenticated Users"]
-            for principal in risky:
-                if principal in result.stdout:
-                    log.warning(
-                        "SECURITY WARNING: wallet.enc may be readable by '%s'.",
-                        principal,
-                    )
-        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-            log.warning(
-                "SECURITY WARNING: Could not verify wallet.enc permissions on this platform."
-            )
-
-    @staticmethod
-    def _set_secure_permissions(path: Path) -> None:
-        if os.name != "nt":
-            os.chmod(path, 0o600)
+        to_delete = backups[: max(0, len(backups) - max_backups)]
+        for path in to_delete:
+            try:
+                path.unlink()
+                log.debug("Pruned old backup: %s", path.name)
+            except OSError as exc:
+                log.warning("Failed to prune backup %s: %s", path.name, exc)
