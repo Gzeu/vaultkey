@@ -89,13 +89,37 @@ jobs:
       - name: Install MkDocs
         run: pip install mkdocs-material mkdocstrings[python]
 
-      - name: Verify required docs exist
+      - name: Verify required files exist
         run: |
+          test -f LICENSE
           test -f CHANGELOG.md
           test -f SECURITY.md
+          test -f CONTRIBUTING.md
           echo "OK: required docs present"
 
       - name: Build MkDocs site (strict)
         run: mkdocs build --strict
-        # --strict: warnings become errors — broken links, missing docstrings,
-        # undefined nav entries all fail the CI run rather than silently passing.
+        working-directory: docs
+
+  release-check:
+    name: Release Readiness
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    needs: [test, security-scan]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install build tools
+        run: pip install build twine hatchling
+
+      - name: Build distribution
+        run: python -m build
+
+      - name: Check distribution integrity
+        run: twine check dist/*

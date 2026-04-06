@@ -1,68 +1,83 @@
 # Security Architecture
 
-## Storage Format
-
-The wallet file (`wallet.enc`) is a binary format with the following layout:
-
-```
-[4 bytes]  Magic: VKEY
-[4 bytes]  Version: 0x0001 (LE uint32)
-[2 bytes]  KDF params JSON length (LE uint16)
-[N bytes]  KDF params JSON (UTF-8)
-[12 bytes] AES-GCM nonce
-[M bytes]  AES-GCM ciphertext + 16-byte GCM tag
-```
-
-The **ciphertext** decrypts to a JSON blob containing:
-- `master_hash`: Argon2id hash of the master password (for verification)
-- `keys`: dict of `{entry_id: APIKeyEntry}` 
-- `integrity_hmac`: HMAC-SHA256 over all entry ciphertexts
-- `version`, `created_at`, `updated_at`
-
 ## Key Hierarchy
 
 ```
 Master Password
-      │
-      ▼  Argon2id (t=3, m=64MB, p=1, salt=32B random)
- Master Key (32 bytes, AES-256)
-      │
-      ├─► Wallet AES-GCM encryption (wallet.enc body)
-      │
-      └─► HKDF-SHA256(master_key, info=“vaultkey:entry:<uuid>”, salt=DOMAIN_SALT)
-              │
-              ▼
-         Entry Sub-Key (32 bytes, unique per entry)
-              │
-              ▼  AES-256-GCM
-         Encrypted API Key Value
+    │
+    ├── Argon2id (64 MB, 3 iter, 4 threads)
+    │       └── Master Key (32 bytes)
+    │               ├── HKDF-SHA256(info="wallet:entry:<uuid>")
+    │               │       └── Entry Subkey (32 bytes)
+    │               │               └── AES-256-GCM(nonce, AAD) → ciphertext
+    │               └── HMAC-SHA256 over all entry IDs + ciphertexts
+    │                       └── Integrity Manifest
+    └── Argon2id (separate salt)
+            └── Master Hash (stored encrypted, used to verify password)
 ```
 
-## Why per-entry sub-keys?
+## AES-256-GCM Details
 
-If an attacker recovers one entry’s sub-key (e.g., via a side-channel),
-they **cannot** derive other entries’ sub-keys without the master key.
-HKDF with distinct `info` strings provides cryptographic domain separation.
+- **Nonce**: 96-bit (12 bytes), generated fresh per entry per write via `os.urandom(12)`
+- **AAD (Additional Authenticated Data)**: `SHA-256(wallet_path)` — binds the ciphertext to the specific wallet file path, preventing relocation attacks
+- **Tag**: 128-bit authentication tag, verified before any plaintext is returned
+- **Key rotation**: Rotating an entry generates a new nonce and re-encrypts under the same master key
 
-## Associated Authenticated Data (AAD)
+## Argon2id Parameters
 
-The outer AES-GCM encryption uses `SHA-256(wallet_path)` as AAD.
-This binds the ciphertext to the exact file path.
-Moving `wallet.enc` to a different path will cause AES-GCM authentication to fail—
-preventing relocation attacks.
+| Parameter | Value | Rationale |
+|---|---|---|
+| Memory | 64 MB | Makes GPU/ASIC attacks expensive |
+| Iterations | 3 | Time hardness on top of memory |
+| Parallelism | 4 | Matches typical CPU core count |
+| Salt | 32 bytes random | Unique per wallet |
+| Output | 32 bytes | AES-256 key |
 
-## Integrity Manifest
+## Per-Entry Subkey Isolation
 
-After decryption, VaultKey verifies:
+Each API key is encrypted under its own subkey derived via HKDF-SHA256:
+
+```python
+subkey = HKDF(
+    algorithm=SHA256,
+    length=32,
+    salt=domain_salt,       # "vaultkey-entry-v1" encoded
+    info=f"wallet:entry:{entry_uuid}".encode(),
+).derive(master_key)
 ```
-HMAC-SHA256(master_key, sorted(entry.cipher_hex for entry in entries))
-```
-This detects any in-place modification of entry ciphertexts that bypasses
-the outer AES-GCM layer (e.g., direct file editing after decryption).
+
+Compromising one entry's subkey reveals nothing about any other entry or the master key.
 
 ## Memory Security
 
-- The master key is stored as a `bytearray` (mutable).
-- On lock: `ctypes.memset` zeros the buffer byte-by-byte, bypassing Python’s GC.
-- `SecureMemory` context manager zeros intermediate keys (HKDF sub-keys) immediately after use.
-- Sensitive CLI prompts use `echo=False` (never appear in terminal or shell history).
+- Derived keys are stored in `SecureBytes` wrapper that calls `ctypes.memset` on cleanup
+- `SessionManager.lock()` zeros the key immediately regardless of GC timing
+- Auto-lock runs via `threading.Timer` — the key is zeroed even if the process is idle
+- Python's GC is non-deterministic; `ctypes.memset` bypasses it for guaranteed zeroing
+
+## HMAC Integrity Manifest
+
+After every write, a HMAC-SHA256 is computed over the concatenation of all entry UUIDs and their ciphertexts, in sorted order. On load, the manifest is recomputed and compared. Any mutation (added/removed/modified entry, bit-rot) fails verification and raises `IntegrityError`.
+
+## Audit Log
+
+Every operation is appended to `audit.log` as a JSON-Lines record:
+
+```json
+{"ts": "2026-04-06T12:00:00Z", "event": "GET", "key_name": "OpenAI Prod", "status": "OK", "pid": 12345, "user": "george"}
+```
+
+The audit log file is set to `chmod 600` and uses atomic append to prevent corruption under concurrent access.
+
+## Threat Model
+
+| Threat | Mitigation |
+|---|---|
+| Disk theft | AES-256-GCM + Argon2id: brute-force infeasible |
+| File relocation | AAD binding to `SHA-256(wallet_path)` |
+| Silent tampering | HMAC-SHA256 integrity manifest |
+| Clipboard sniffing | Auto-clear after 30 s |
+| Brute-force login | Exponential backoff + 60 s lockout after 5 failures |
+| Memory dump | `ctypes.memset` zeroing on lock/timeout |
+| Partial write crash | Atomic `os.replace()` — no half-written files |
+| Unauthorized copy | chmod 600 on wallet + audit log |
