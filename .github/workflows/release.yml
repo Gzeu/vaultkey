@@ -114,9 +114,6 @@ jobs:
     name: Publish to PyPI
     runs-on: ubuntu-latest
     needs: github-release
-    environment:
-      name: pypi
-      url: https://pypi.org/project/vaultkey/${{ needs.build.outputs.version }}
     steps:
       - name: Download build artifacts
         uses: actions/download-artifact@v4
