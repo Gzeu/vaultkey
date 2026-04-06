@@ -1,0 +1,75 @@
+site_name: VaultKey
+site_description: Ultra-secure local API key wallet with AES-256-GCM, Argon2id, HMAC integrity
+site_url: https://gzeu.github.io/vaultkey
+repo_url: https://github.com/Gzeu/vaultkey
+repo_name: Gzeu/vaultkey
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  palette:
+    - scheme: slate
+      primary: indigo
+      accent: cyan
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+    - scheme: default
+      primary: indigo
+      accent: cyan
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.code.annotate
+  icon:
+    repo: fontawesome/brands/github
+
+docs_dir: docs
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.tabbed:
+      alternate_style: true
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+
+plugins:
+  - search
+
+nav:
+  - Home: index.md
+  - Getting Started:
+    - Installation: guide/install.md
+    - Quick Start: guide/quickstart.md
+    - Configuration: guide/config.md
+    - Bulk Import: guide/bulk-import.md
+  - CLI Reference: reference/cli.md
+  - Interfaces:
+    - TUI: reference/tui.md
+    - GUI: reference/gui.md
+  - Security:
+    - Architecture: security/architecture.md
+    - Threat Model: security/threats.md
+  - API Reference:
+    - crypto: api/crypto.md
+    - kdf: api/kdf.md
+    - session: api/session.md
+    - storage: api/storage.md
+    - health: api/health.md
+    - integrity: api/integrity.md
+  - Changelog: changelog.md
