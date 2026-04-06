@@ -11,6 +11,12 @@ Design decisions:
 - After MAX_FAILED_ATTEMPTS consecutive failures, a 60-second hard lockout applies.
 - The key is NEVER written to disk, /tmp, or environment variables.
 
+Configuration via environment variables (set in .env or shell):
+  VAULTKEY_SESSION_TIMEOUT_MINUTES  int >= 1   default: 15
+  VAULTKEY_MAX_FAILED_ATTEMPTS      int >= 1   default: 5
+  VAULTKEY_LOCKOUT_BASE_DELAY       int >= 1   default: 2  (seconds)
+  VAULTKEY_HARD_LOCKOUT_SECONDS     int >= 1   default: 60
+
 SECURITY FIXES v1.1:
   FIX #1 (CRITIC): time.sleep() moved OUTSIDE _op_lock.
     Previously sleep(60) inside lock → any concurrent get_key/lock/unlock
@@ -27,21 +33,79 @@ FIXES v1.2 (Wave 6):
     incorrect timeout calculations in non-UTC timezones.
   IMPROVEMENT: info property now exposes seconds_until_unlock so TUI/GUI
     can display a live countdown without re-implementing the timeout logic.
+
+FIXES v1.2.1:
+  FIX #8 (CRITICAL): Session constants were hardcoded — env vars had NO effect.
+    VAULTKEY_SESSION_TIMEOUT_MINUTES=60 in .env was silently ignored,
+    causing the session to lock after 15 minutes regardless of user config.
+    All four constants now read from os.environ at import time with safe
+    int parsing, range validation, and a warning on invalid values.
 """
 
 import ctypes
+import os
 import threading
 import time
+import warnings
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from wallet.utils.audit import audit_log
 
-SESSION_TIMEOUT_MINUTES: int = 15
-MAX_FAILED_ATTEMPTS: int = 5
-LOCKOUT_BASE_DELAY: int = 2    # seconds — base for 2^(n-1) exponential backoff
-HARD_LOCKOUT_SECONDS: int = 60
 
+# ------------------------------------------------------------------ #
+# Configuration — read from environment with safe fallback
+# ------------------------------------------------------------------ #
+
+def _load_env_int(var: str, default: int, min_val: int, max_val: int) -> int:
+    """
+    Read an integer environment variable with validation.
+
+    Returns `default` if the variable is unset or empty.
+    Emits a UserWarning and returns `default` if the value is not a valid
+    integer or falls outside [min_val, max_val].
+    """
+    raw = os.environ.get(var, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        warnings.warn(
+            f"[VaultKey] {var}={raw!r} is not a valid integer; "
+            f"using default ({default}).",
+            UserWarning,
+            stacklevel=2,
+        )
+        return default
+    if not (min_val <= value <= max_val):
+        warnings.warn(
+            f"[VaultKey] {var}={value} is out of range [{min_val}, {max_val}]; "
+            f"using default ({default}).",
+            UserWarning,
+            stacklevel=2,
+        )
+        return default
+    return value
+
+
+SESSION_TIMEOUT_MINUTES: int = _load_env_int(
+    "VAULTKEY_SESSION_TIMEOUT_MINUTES", default=15, min_val=1, max_val=1440
+)
+MAX_FAILED_ATTEMPTS: int = _load_env_int(
+    "VAULTKEY_MAX_FAILED_ATTEMPTS", default=5, min_val=1, max_val=50
+)
+LOCKOUT_BASE_DELAY: int = _load_env_int(
+    "VAULTKEY_LOCKOUT_BASE_DELAY", default=2, min_val=1, max_val=30
+)
+HARD_LOCKOUT_SECONDS: int = _load_env_int(
+    "VAULTKEY_HARD_LOCKOUT_SECONDS", default=60, min_val=10, max_val=3600
+)
+
+
+# ------------------------------------------------------------------ #
+# Exceptions
+# ------------------------------------------------------------------ #
 
 class WalletLockedException(Exception):
     """Raised when the wallet is locked and an operation requires it to be open."""
@@ -52,6 +116,10 @@ class TooManyAttemptsException(Exception):
         self.wait_seconds = wait_seconds
         super().__init__(f"Too many failed attempts. Wait {wait_seconds}s.")
 
+
+# ------------------------------------------------------------------ #
+# SessionManager
+# ------------------------------------------------------------------ #
 
 class SessionManager:
     """
@@ -90,12 +158,13 @@ class SessionManager:
         """Store the derived key and start the inactivity timer."""
         with self._op_lock:
             self._derived_key = bytearray(derived_key)
-            self._unlocked_at = datetime.now(timezone.utc)   # FIX #7
-            self._last_activity = datetime.now(timezone.utc)  # FIX #7
+            self._unlocked_at = datetime.now(timezone.utc)
+            self._last_activity = datetime.now(timezone.utc)
             self._failed_attempts = 0
             self._last_failed_at = None
             self._reset_timer()
-        audit_log("UNLOCK", status="OK")
+        audit_log("UNLOCK", status="OK",
+                  extra=f"timeout={SESSION_TIMEOUT_MINUTES}m")
 
     def lock(self, reason: str = "manual") -> None:
         """Zero the key in memory and cancel the timer."""
@@ -111,11 +180,9 @@ class SessionManager:
         Return a copy of the derived key.
         Raises WalletLockedException if locked or timed out.
         Raises TooManyAttemptsException if still within lockout window.
-
-        Note: _check_lockout() is called with lock held and must NOT sleep.
         """
         with self._op_lock:
-            self._check_lockout()   # raises if in lockout window (no sleep)
+            self._check_lockout()
             if self._derived_key is None:
                 raise WalletLockedException("Wallet is locked. Run: wallet unlock")
             if self._is_timed_out():
@@ -129,7 +196,6 @@ class SessionManager:
     def record_failed_attempt(self) -> None:
         """
         Increment failure counter and apply exponential backoff delay.
-
         CRITICAL: sleep() is called OUTSIDE _op_lock.
         """
         hard_lockout = False
@@ -138,7 +204,7 @@ class SessionManager:
 
         with self._op_lock:
             self._failed_attempts += 1
-            self._last_failed_at = datetime.now(timezone.utc)  # FIX #7
+            self._last_failed_at = datetime.now(timezone.utc)
             attempt_num = self._failed_attempts
             if self._failed_attempts >= MAX_FAILED_ATTEMPTS:
                 hard_lockout = True
@@ -153,7 +219,6 @@ class SessionManager:
             status="FAIL",
         )
 
-        # Sleep OUTSIDE lock
         if hard_lockout:
             time.sleep(HARD_LOCKOUT_SECONDS)
             raise TooManyAttemptsException(wait_seconds=HARD_LOCKOUT_SECONDS)
@@ -168,7 +233,7 @@ class SessionManager:
 
     @property
     def info(self) -> dict:
-        """Session metadata. seconds_until_unlock is useful for TUI/GUI countdowns."""
+        """Session metadata. seconds_until_lock is useful for TUI/GUI countdowns."""
         seconds_until_lock: int | None = None
         if self._last_activity is not None and not self._is_timed_out():
             elapsed = (
@@ -186,6 +251,7 @@ class SessionManager:
                 self._last_activity.isoformat() if self._last_activity else None
             ),
             "timeout_minutes": SESSION_TIMEOUT_MINUTES,
+            "max_failed_attempts": MAX_FAILED_ATTEMPTS,
             "failed_attempts": self._failed_attempts,
             "seconds_until_lock": seconds_until_lock,
         }
@@ -224,7 +290,7 @@ class SessionManager:
 
     def _touch(self) -> None:
         """Update last-activity timestamp and restart the idle timer."""
-        self._last_activity = datetime.now(timezone.utc)  # FIX #7
+        self._last_activity = datetime.now(timezone.utc)
         self._reset_timer()
 
     def _is_timed_out(self) -> bool:
@@ -237,22 +303,20 @@ class SessionManager:
     def _check_lockout(self) -> None:
         """
         Called with _op_lock held — MUST NOT sleep.
-
-        If the hard-lockout window is active: raise TooManyAttemptsException immediately.
-        When window expires: reset counter and emit LOCKOUT_RESET audit event.
+        Raises TooManyAttemptsException if within hard-lockout window.
+        Resets counter and emits audit event when window expires.
         """
         if (
             self._failed_attempts >= MAX_FAILED_ATTEMPTS
             and self._last_failed_at is not None
         ):
             elapsed = (
-                datetime.now(timezone.utc) - self._last_failed_at  # FIX #7
+                datetime.now(timezone.utc) - self._last_failed_at
             ).total_seconds()
             remaining = int(max(0.0, HARD_LOCKOUT_SECONDS - elapsed))
             if remaining > 0:
                 raise TooManyAttemptsException(wait_seconds=remaining)
 
-            # Window expired — reset and log (FIX #3)
             audit_log(
                 "LOCKOUT_RESET",
                 status="OK",
