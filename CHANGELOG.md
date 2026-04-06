@@ -6,6 +6,50 @@ Versioning: [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.4.0] — Wave 7 (2026-04-06)
+
+### Added
+- **`wallet/core/rotate.py`** — Bulk key rotation engine:
+  - `rotate_single(payload, master_key, entry_id, new_value)` — re-criptează o intrare cu nonce proaspăt.
+  - `rotate_all(payload, master_key, storage) -> RotateReport` — re-criptează TOATE intrările cu nonce-uri noi, salvează wallet atomic (numai dacă 0 erori).
+  - `RotateReport` / `RotateResult` — dataclasses cu `succeeded`, `failed`, `total`, `finished_at`.
+  - Audit log: `KEY_ROTATED`, `ROTATE_ALL` (OK / PARTIAL_FAIL).
+- **`wallet/utils/shell_completion.py`** — Completare dinamică shell pentru CLI:
+  - `entry_names_completer(incomplete)` — completare live după numele cheilor din wallet-ul deblocat.
+  - `service_names_completer(incomplete)` — servicii unice.
+  - `tag_completer(incomplete)` — tag-uri unice.
+  - Returnează `[]` silențios dacă wallet-ul e blocat (nici o excepție în shell).
+- **`wallet/utils/expiry_checker.py`** — rewrite complet:
+  - `check_expiry(payload, warn_days) -> ExpiryReport` — scanare sincronă cu categorii expired / warning / ok / no_expiry.
+  - `ExpiryChecker` — daemon thread cu `start()` / `stop()` / `check_now()`, callbacks `on_expired` + `on_warning`.
+  - `watch_expiry()` — blocking loop CLI-friendly cu Ctrl+C.
+  - `ExpiryReport.summary()` — string cu contoarele tuturor categoriilor.
+- **`wallet/ui/tui_import.py`** — `ImportScreen(ModalScreen)` pentru TUI:
+  - Input path fișier CSV sau JSON.
+  - `DataTable` preview cu validare per-rând (verde = OK, roșu = eroare).
+  - Statistici „X valid, Y invalid (skipped)".
+  - Buton „Import X valid rows" activ doar când există rânduri valide.
+  - Salvare wallet după import reușit.
+- **`tests/test_rotate.py`** — 10 teste (R1–R10):
+  - R1–R3: `rotate_single` (valoare recuperabilă, nonce schimbat, KeyError pe ID inexistent).
+  - R4–R8: `rotate_all` (valori intacte, nonce-uri noi, raport corect, persistență, no-save la eșec parțial).
+  - R9–R10: `RotateReport` properties și timestamps.
+- **`tests/test_expiry_checker.py`** — 12 teste (E1–E12):
+  - E1–E6: `check_expiry` categorii + `summary()` + `total`.
+  - E7–E9: callbacks `on_expired` / `on_warning` / niciun callback pentru .ok.
+  - E10: lifecycle thread (start/stop).
+  - E11–E12: `warn_days` personalizat + total == len(payload.entries).
+- **`tests/test_shell_completion.py`** — 8 teste (SC1–SC8):
+  - SC1–SC4: `entry_names_completer` (prefix, empty, case-insensitive, no match).
+  - SC5–SC6: `service_names_completer` (prefix, deduplicare).
+  - SC7–SC8: `tag_completer` (prefix, locked wallet).
+
+### Changed
+- `wallet/__init__.py`: `__version__` bumped `1.3.0` → `1.4.0`.
+- `pyproject.toml`: `version` bumped `1.3.0` → `1.4.0`.
+
+---
+
 ## [1.3.0] — Wave 6 (2026-04-06)
 
 ### Added
@@ -49,34 +93,12 @@ Versioning: [Semantic Versioning](https://semver.org/).
 
 ### Added
 - **`tests/conftest.py`**: Shared fixtures for entire test suite.
-  - `kdf_params` / `master_key`: session-scoped (Argon2id runs once, not per-test).
-  - `payload_with_keys`: 3 pre-populated entries (active, expiring, expired).
-  - `saved_wallet`: storage + key + payload already saved to disk.
-  - `make_entry()`: factory for `APIKeyEntry` with controlled state.
 - **`tests/test_hypothesis.py`**: 13 property-based tests (Hypothesis).
-  - P1–P5: AES-GCM invariants (roundtrip, nonce uniqueness, HKDF domain separation, tamper detection).
-  - P6–P8: Validator invariants (no-raise on valid inputs, whitespace rejection, future date acceptance).
-  - P9–P11: Model invariants (payload roundtrip, search subset, status_label validity).
-  - P12–P13: KDF determinism and password distinguishability.
-- **`tests/test_health.py`**: 12 tests covering score signals, grade thresholds, wallet-level aggregation.
-- **`tests/test_prefix_detect.py`**: 8 tests for 8 known service prefixes + mask_key.
-- **`tests/test_integrity.py`**: 6 tests for clean/tampered/empty/strict verify_integrity.
+- **`tests/test_health.py`**: 12 tests.
+- **`tests/test_prefix_detect.py`**: 8 tests.
+- **`tests/test_integrity.py`**: 6 tests.
 - **`pyproject.toml` complete rewrite**: migrated from Poetry to Hatchling.
-  - PEP 621 compliant `[project]` table with classifiers, keywords, URLs.
-  - `[tool.ruff.lint]` extended: `S`, `ANN`, `BLE`, `W` rule sets.
-  - `[tool.ruff.lint.per-file-ignores]` for tests and UI.
-  - `[tool.mypy]` strict config (excluding UI and tests).
-  - `[tool.bandit]` integrated into pyproject (no separate config file).
-  - `[tool.hypothesis]` settings: deadline=5000, suppress too_slow.
-  - `[tool.coverage.run]` with `branch = true`.
-  - `[project.urls]` with Homepage, Repository, Bug Tracker, Changelog, Security.
-- **`wallet/__init__.py`**: `__version__ = "1.2.0"`, hatch version source.
-- **MkDocs documentation site** (`docs/`):
-  - `mkdocs.yml`: Material theme, dark/light toggle, mkdocstrings plugin.
-  - `docs/index.md`: Overview, quick install, quick start, security table.
-  - `docs/guide/install.md`: Platform notes, clipboard backends, wallet location.
-  - `docs/guide/quickstart.md`: Step-by-step 8-command walkthrough.
-  - `docs/security/architecture.md`: Storage format layout, key hierarchy diagram, AAD, HMAC manifest, memory security.
+- **MkDocs documentation site** (`docs/`).
 
 ### Changed
 - `pyproject.toml`: build backend changed from Poetry to Hatchling (PEP 621).
@@ -89,16 +111,14 @@ Versioning: [Semantic Versioning](https://semver.org/).
 ### Added
 - CLI: `health`, `audit`, `verify`, `wipe`, `tag`, `search`, `export`, `import`, `change-password`, `rotate`, `tui`, `gui`.
 - **Textual TUI** (`tui.py`): Keys, Health, Audit, Status panels.
-- **CustomTkinter GUI** (`gui.py`): Keys, Health, Settings tabs (Wave 4 rewrite).
-- `tests/test_storage.py` (12), `test_kdf.py` (10), `test_crypto.py` (16), `test_session.py` (14), `test_audit.py` (12), `test_validators.py` (20).
-- `.github/workflows/ci.yml`: 9-combination matrix + bandit security scan.
-- `SECURITY.md`: Threat model, crypto primitives table.
-- `CHANGELOG.md`: This file.
+- **CustomTkinter GUI** (`gui.py`): Keys, Health, Settings tabs.
+- 6 test files totalling 84 tests.
+- `.github/workflows/ci.yml`: 9-combination matrix + bandit.
+- `SECURITY.md`, `CHANGELOG.md`.
 
 ### Fixed
-- `gui.py`: `_tmp_` encrypt bug — UUID generated before first `encrypt_entry_value`.
-- `gui.py`: `on_closing` locks session on OS window close.
-- `cli.py`: `list_keys` sort by expires uses `datetime.max` fallback.
+- `gui.py`: `_tmp_` encrypt bug, `on_closing` lock.
+- `cli.py`: `list_keys` sort fallback.
 
 ---
 
@@ -113,9 +133,9 @@ Versioning: [Semantic Versioning](https://semver.org/).
 - `audit.py`, `clipboard.py`, `prefix_detect.py`, `validators.py`.
 
 ### Security fixes (v1.1 patch)
-- FIX #1 (CRITICAL): `time.sleep()` outside `_op_lock` (deadlock prevention).
-- FIX #2 (CRITICAL): UUID before first encrypt in `add` (no `_tmp_` sub-key).
-- FIX #3 (MODERATE): `LOCKOUT_RESET` audit event on lockout expiry.
-- FIX #4 (MODERATE): `datetime` import consolidated at module level.
-- FIX #5 (MINOR): HMAC manifest written on every `storage.save()`.
-- FIX #6 (MINOR): Explicit HKDF domain-separation salt (RFC 5869 §3.1).
+- FIX #1 (CRITICAL): `time.sleep()` outside `_op_lock`.
+- FIX #2 (CRITICAL): UUID before first encrypt in `add`.
+- FIX #3 (MODERATE): `LOCKOUT_RESET` audit event.
+- FIX #4 (MODERATE): `datetime` import consolidated.
+- FIX #5 (MINOR): HMAC manifest on every `storage.save()`.
+- FIX #6 (MINOR): Explicit HKDF domain-separation salt.

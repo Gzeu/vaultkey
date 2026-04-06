@@ -1,80 +1,186 @@
 """
-expiry_checker.py — Expiry-warning utility for VaultKey (Wave 7).
+expiry_checker.py — Background expiry watcher for VaultKey.
 
-Called automatically at unlock time and available as a standalone
-`wallet expiry-check` command.
+Public API:
+  ExpiryChecker(payload, warn_days, on_expired, on_warning)
+      .start()   — launch background daemon thread
+      .stop()    — signal thread to stop
+      .check_now() -> ExpiryReport  — run synchronous check
 
-Returns a list of ExpiryWarning dataclasses sorted by urgency
-(soonest expiry first). Warnings are emitted only for active,
-non-expired entries that fall within `days` of their expiry date.
+  ExpiryReport   — dataclass with expired / warning / ok lists
+  watch_expiry() — CLI-friendly blocking loop (Ctrl+C to stop)
+
+The checker polls once per `interval_seconds` (default: 3600).
+It calls `on_expired(entry)` / `on_warning(entry)` callbacks so
+callers decide how to surface the alerts (notify, log, TUI banner, etc.).
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime, timezone
-from typing import TYPE_CHECKING
+import threading
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
+from typing import Callable, Optional
 
-if TYPE_CHECKING:
-    from wallet.models.wallet import WalletPayload
+from wallet.models.wallet import APIKeyEntry, WalletPayload
+from wallet.utils.audit import log_event
 
 
-@dataclass(frozen=True, order=True)
-class ExpiryWarning:
-    """Single entry expiry warning, sortable by days_left."""
-    days_left: int          # sort key — soonest first
-    name: str
-    service: str
-    expires_at: datetime
-    is_expired: bool
+@dataclass
+class ExpiryReport:
+    checked_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    expired: list[APIKeyEntry] = field(default_factory=list)
+    warning: list[APIKeyEntry] = field(default_factory=list)
+    ok: list[APIKeyEntry] = field(default_factory=list)
+    no_expiry: list[APIKeyEntry] = field(default_factory=list)
 
     @property
-    def urgency(self) -> str:
-        """Human-readable urgency label."""
-        if self.is_expired:
-            return "expired"
-        if self.days_left <= 3:
-            return "critical"
-        if self.days_left <= 7:
-            return "warning"
-        return "info"
+    def total(self) -> int:
+        return len(self.expired) + len(self.warning) + len(self.ok) + len(self.no_expiry)
+
+    def summary(self) -> str:
+        return (
+            f"Checked {self.total} entries: "
+            f"{len(self.expired)} expired, "
+            f"{len(self.warning)} expiring soon, "
+            f"{len(self.ok)} valid, "
+            f"{len(self.no_expiry)} no expiry set."
+        )
 
 
 def check_expiry(
-    payload: "WalletPayload",
-    days: int = 7,
-) -> list[ExpiryWarning]:
+    payload: WalletPayload,
+    warn_days: int = 30,
+) -> ExpiryReport:
     """
-    Return ExpiryWarning entries for all active keys expiring within `days`.
-
-    Args:
-        payload: The loaded WalletPayload.
-        days:    Warning horizon in days (default 7).
-                 Pass a higher value (e.g. 14 or 30) for broader sweeps.
-
-    Returns:
-        List of ExpiryWarning sorted by days_left ascending (soonest first).
-        Empty list when no keys are near expiry.
+    Synchronous, single-pass expiry scan.
+    Returns an ExpiryReport with all entries categorised.
     """
+    report = ExpiryReport()
     now = datetime.now(timezone.utc)
-    warnings: list[ExpiryWarning] = []
+    threshold = now + timedelta(days=warn_days)
 
-    for entry in payload.keys.values():
-        if not entry.is_active or entry.expires_at is None:
-            continue
-
-        delta = entry.expires_at - now
-        days_left = int(delta.total_seconds() // 86400)
-
-        if days_left <= days:
-            warnings.append(
-                ExpiryWarning(
-                    days_left=days_left,
-                    name=entry.name,
-                    service=entry.service,
-                    expires_at=entry.expires_at,
-                    is_expired=entry.is_expired,
-                )
+    for entry in payload.entries:
+        if entry.expires_at is None:
+            report.no_expiry.append(entry)
+        elif entry.expires_at <= now:
+            report.expired.append(entry)
+            log_event(
+                event="EXPIRY_ALERT",
+                status="EXPIRED",
+                key_name=entry.name,
+                extra=f"expired={entry.expires_at.date()}",
             )
+        elif entry.expires_at <= threshold:
+            report.warning.append(entry)
+            days_left = (entry.expires_at - now).days
+            log_event(
+                event="EXPIRY_WARNING",
+                status="WARNING",
+                key_name=entry.name,
+                extra=f"days_left={days_left}",
+            )
+        else:
+            report.ok.append(entry)
 
-    return sorted(warnings)
+    return report
+
+
+class ExpiryChecker:
+    """
+    Background daemon thread that calls check_expiry() periodically.
+
+    Parameters
+    ----------
+    payload       : Live WalletPayload reference (reads current state each poll)
+    warn_days     : Days before expiry to trigger on_warning callback (default 30)
+    interval_secs : Polling interval in seconds (default 3600 = 1 hour)
+    on_expired    : Callback(entry) called for each expired entry
+    on_warning    : Callback(entry) called for each entry expiring within warn_days
+    """
+
+    def __init__(
+        self,
+        payload: WalletPayload,
+        warn_days: int = 30,
+        interval_secs: int = 3600,
+        on_expired: Optional[Callable[[APIKeyEntry], None]] = None,
+        on_warning: Optional[Callable[[APIKeyEntry], None]] = None,
+    ) -> None:
+        self._payload = payload
+        self._warn_days = warn_days
+        self._interval = interval_secs
+        self._on_expired = on_expired or (lambda e: None)
+        self._on_warning = on_warning or (lambda e: None)
+        self._stop_event = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self._last_report: Optional[ExpiryReport] = None
+
+    @property
+    def last_report(self) -> Optional[ExpiryReport]:
+        return self._last_report
+
+    def check_now(self) -> ExpiryReport:
+        """Run a synchronous check and store the result."""
+        report = check_expiry(self._payload, self._warn_days)
+        self._last_report = report
+        for entry in report.expired:
+            self._on_expired(entry)
+        for entry in report.warning:
+            self._on_warning(entry)
+        return report
+
+    def start(self) -> None:
+        """Launch the background daemon thread."""
+        if self._thread and self._thread.is_alive():
+            return
+        self._stop_event.clear()
+        self._thread = threading.Thread(
+            target=self._run,
+            name="vaultkey-expiry-checker",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def stop(self) -> None:
+        """Signal the background thread to stop."""
+        self._stop_event.set()
+        if self._thread:
+            self._thread.join(timeout=5)
+
+    def _run(self) -> None:
+        while not self._stop_event.is_set():
+            try:
+                self.check_now()
+            except Exception:  # noqa: BLE001
+                pass
+            self._stop_event.wait(timeout=self._interval)
+
+
+def watch_expiry(
+    payload: WalletPayload,
+    warn_days: int = 30,
+    interval_secs: int = 3600,
+) -> None:
+    """
+    Blocking expiry-watch loop.  Prints a summary each poll cycle.
+    Exit with Ctrl+C.
+    """
+    import time
+
+    print(f"[VaultKey] Watching for expiry every {interval_secs}s. Ctrl+C to stop.")
+    checker = ExpiryChecker(payload, warn_days=warn_days, interval_secs=interval_secs)
+    try:
+        while True:
+            report = checker.check_now()
+            print(f"[{datetime.now(timezone.utc).strftime('%H:%M:%S')}] {report.summary()}")
+            if report.expired:
+                for e in report.expired:
+                    print(f"  🔴 EXPIRED: {e.name} (expired {e.expires_at})")
+            if report.warning:
+                for e in report.warning:
+                    days = (e.expires_at - datetime.now(timezone.utc)).days  # type: ignore
+                    print(f"  ⚠️  WARNING: {e.name} expires in {days}d")
+            time.sleep(interval_secs)
+    except KeyboardInterrupt:
+        print("\n[VaultKey] Watch stopped.")
