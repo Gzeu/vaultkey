@@ -6,6 +6,45 @@ Versioning: [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.6.0] — Wave 10 cleanup (2026-04-06)
+
+### Changed
+- `pyproject.toml`: version bumped `1.5.0` → `1.6.0`; added `httpx>=0.27` runtime dependency (webhook HTTP client).
+- `wallet/__init__.py`: `__version__` bumped to `1.6.0`.
+
+### Removed
+- `wallet/ui/cli_wave9.py`: staging file deleted — all Wave 9 commands (`profile`, `share`, `webhook`) are fully integrated into `cli.py`.
+
+---
+
+## [1.5.0] — Wave 8 + Wave 9 (2026-04-06)
+
+### Added
+- **Wave 8 — `rotate-all`, `watch-expiry`, `completion`**:
+  - `wallet/core/rotate.py`: `rotate_all()` with `--tag` scope + `--dry-run` preview.
+  - `wallet/utils/expiry_checker.py`: `ExpiryChecker` daemon thread with `on_expired` / `on_warning` callbacks.
+  - `wallet/utils/shell_completion.py`: live completers for entry names, services, tags.
+  - CLI: `rotate-all`, `watch-expiry --interval`, `completion` commands.
+- **Wave 9 — profiles, share, webhook**:
+  - `wallet/utils/vault_profiles.py`: `VaultProfiles` manager — `create`, `switch`, `list`, `delete` isolated wallets per profile.
+  - `wallet/utils/share_token.py`: `ShareToken` — encrypted one-time share tokens with expiry and revocation.
+  - `wallet/utils/webhook.py`: `WebhookManager` — add/list/remove/test webhooks; `httpx` POST with HMAC-SHA256 signature.
+  - CLI sub-apps: `wallet profile` (create/switch/list/delete/current) and `wallet webhook` (add/list/remove/test).
+  - CLI: `wallet share <name>`, `wallet share-receive <token>`, `wallet share-list`, `wallet share-revoke <id>`.
+- **Tests**:
+  - `tests/test_vault_profiles.py`: 12 tests (VP1–VP12).
+  - `tests/test_share_token.py`: 10 tests (ST1–ST10).
+  - `tests/test_webhook.py`: 10 tests (WH1–WH10).
+- **GUI** (`wallet/ui/gui.py`): Health tab + Settings tab completed; clipboard clear timer integrated.
+- **TUI** (`wallet/ui/tui.py`): Wave 9 full feature parity — all CLI commands reachable from keyboard.
+
+### Changed
+- `wallet/__init__.py`: `__version__` bumped `1.4.0` → `1.5.0`.
+- `pyproject.toml`: version bumped `1.4.0` → `1.5.0`.
+- `README.md`: full rewrite to v1.5.0 — CLI reference, security table, binary format schema, testing treelist, changelog.
+
+---
+
 ## [1.4.0] — Wave 7 (2026-04-06)
 
 ### Added
@@ -24,25 +63,10 @@ Versioning: [Semantic Versioning](https://semver.org/).
   - `ExpiryChecker` — daemon thread cu `start()` / `stop()` / `check_now()`, callbacks `on_expired` + `on_warning`.
   - `watch_expiry()` — blocking loop CLI-friendly cu Ctrl+C.
   - `ExpiryReport.summary()` — string cu contoarele tuturor categoriilor.
-- **`wallet/ui/tui_import.py`** — `ImportScreen(ModalScreen)` pentru TUI:
-  - Input path fișier CSV sau JSON.
-  - `DataTable` preview cu validare per-rând (verde = OK, roșu = eroare).
-  - Statistici „X valid, Y invalid (skipped)".
-  - Buton „Import X valid rows" activ doar când există rânduri valide.
-  - Salvare wallet după import reușit.
-- **`tests/test_rotate.py`** — 10 teste (R1–R10):
-  - R1–R3: `rotate_single` (valoare recuperabilă, nonce schimbat, KeyError pe ID inexistent).
-  - R4–R8: `rotate_all` (valori intacte, nonce-uri noi, raport corect, persistență, no-save la eșec parțial).
-  - R9–R10: `RotateReport` properties și timestamps.
-- **`tests/test_expiry_checker.py`** — 12 teste (E1–E12):
-  - E1–E6: `check_expiry` categorii + `summary()` + `total`.
-  - E7–E9: callbacks `on_expired` / `on_warning` / niciun callback pentru .ok.
-  - E10: lifecycle thread (start/stop).
-  - E11–E12: `warn_days` personalizat + total == len(payload.entries).
-- **`tests/test_shell_completion.py`** — 8 teste (SC1–SC8):
-  - SC1–SC4: `entry_names_completer` (prefix, empty, case-insensitive, no match).
-  - SC5–SC6: `service_names_completer` (prefix, deduplicare).
-  - SC7–SC8: `tag_completer` (prefix, locked wallet).
+- **`wallet/ui/tui_import.py`** — `ImportScreen(ModalScreen)` pentru TUI.
+- **`tests/test_rotate.py`** — 10 teste (R1–R10).
+- **`tests/test_expiry_checker.py`** — 12 teste (E1–E12).
+- **`tests/test_shell_completion.py`** — 8 teste (SC1–SC8).
 
 ### Changed
 - `wallet/__init__.py`: `__version__` bumped `1.3.0` → `1.4.0`.
@@ -53,55 +77,36 @@ Versioning: [Semantic Versioning](https://semver.org/).
 ## [1.3.0] — Wave 6 (2026-04-06)
 
 ### Added
-- **Complete TUI rewrite** (`wallet/ui/tui.py`) — 950 → 1,400 LOC, full feature parity with CLI:
-  - `AddKeyModal`: formular complet cu name, value (mascat), service, description, tags, expiry (YYYY-MM-DD), environment + buton **🎲 Generate** inline.
-  - `EditKeyModal`: editare service, description, tags, expiry, environment + dropdown status (active / revoked / expired / deprecated).
-  - `ConfirmDeleteModal`: dialog de confirmare cu text entry name înainte de ștergere destructivă.
-  - `KeyDetailModal`: view complet cu toate metadatele (health score, access count, last accessed, created, expiry) + buton **Copy Value** cu clipboard clear timer.
-  - `GeneratorModal`: generator criptografic (`secrets`) — lungime configurabilă (8–256), charset (all / alphanum / hex / alpha), copy direct la clipboard.
-- **Tab `⏰ Expiry`** (`ExpiryPanel`): toate cheile grupate în 4 secțiuni colorate — EXPIRED (roșu), Expiring ≤30 zile (galben), Valid (verde), Fără expiry — sortate după urgență.
-- **`StatusPanel` cu countdown live**: timer 1s cu `set_interval`, culori verde/galben/roșu la <5 min / <1 min; afișează unlock time, last activity, failed attempts, full config.
-- **`KeysPanel` toolbar vizual**: butoane `[+ Add]` `[✏ Edit]` `[🗑 Delete]` `[📋 Copy]` `[ℹ Info]` `[🎲 Generate]` direct deasupra tabelului.
-- **`AuditPanel`** upgrade: filtru live + buton Refresh; afișează ultimele 200 evenimente.
-- **Persistență add/edit/delete**: toate acțiunile apelează `storage.save()` imediat după modificare.
-- **Keyboard bindings complete**:
-  - `n` → AddKeyModal
-  - `e` → EditKeyModal pentru intrarea selectată
-  - `D` → ConfirmDeleteModal
-  - `Enter` / `c` → copy to clipboard
-  - `i` → KeyDetailModal
-  - `g` → GeneratorModal
-  - `/` → focus search input
-  - `r` → refresh keys table
-  - `L` → lock wallet și exit
-  - `q` / `Ctrl+C` → quit cu auto-lock
+- **Complete TUI rewrite** (`wallet/ui/tui.py`) — 950 → 1,400 LOC, full feature parity with CLI.
+- Tab `⏰ Expiry` (`ExpiryPanel`): toate cheile grupate în 4 secțiuni colorate.
+- `StatusPanel` cu countdown live: timer 1s cu `set_interval`.
+- `KeysPanel` toolbar vizual cu butoane inline.
+- `AuditPanel` upgrade: filtru live + buton Refresh.
+- Keyboard bindings complete (n/e/D/Enter/c/i/g/r/L/q).
 
 ### Changed
 - `wallet/__init__.py`: `__version__` bumped `1.2.0` → `1.3.0`.
 - `pyproject.toml`: `version` bumped `1.2.0` → `1.3.0`.
-- `TabbedContent` extins de la 4 la 5 tab-uri (Keys / Health / Expiry / Audit / Status).
-- `UnlockScreen` afișează acum contorul de tentative eșuate (`failed_attempts / max`).
 
 ### Fixed
-- `KeysPanel.selected_entry()`: guard pentru `cursor_row >= len(filtered)` (IndexError prevention).
-- `ExpiryPanel.on_mount`: try/except per-table pentru robustețe când tab-urile lipsesc.
-- `StatusPanel._update_display`: try/except per-widget pentru stabilitate la resize rapid.
+- `KeysPanel.selected_entry()`: guard pentru `cursor_row >= len(filtered)`.
+- `ExpiryPanel.on_mount`: try/except per-table.
+- `StatusPanel._update_display`: try/except per-widget.
 
 ---
 
 ## [1.2.0] — Wave 5 (2026-04-05)
 
 ### Added
-- **`tests/conftest.py`**: Shared fixtures for entire test suite.
-- **`tests/test_hypothesis.py`**: 13 property-based tests (Hypothesis).
-- **`tests/test_health.py`**: 12 tests.
-- **`tests/test_prefix_detect.py`**: 8 tests.
-- **`tests/test_integrity.py`**: 6 tests.
-- **`pyproject.toml` complete rewrite**: migrated from Poetry to Hatchling.
-- **MkDocs documentation site** (`docs/`).
+- `tests/conftest.py`: Shared fixtures for entire test suite.
+- `tests/test_hypothesis.py`: 13 property-based tests.
+- `tests/test_health.py`: 12 tests.
+- `tests/test_prefix_detect.py`: 8 tests.
+- `tests/test_integrity.py`: 6 tests.
+- `pyproject.toml` complete rewrite: migrated from Poetry to Hatchling.
+- MkDocs documentation site (`docs/`).
 
 ### Changed
-- `pyproject.toml`: build backend changed from Poetry to Hatchling (PEP 621).
 - `wallet/__init__.py`: version bumped to 1.2.0.
 
 ---
@@ -110,8 +115,8 @@ Versioning: [Semantic Versioning](https://semver.org/).
 
 ### Added
 - CLI: `health`, `audit`, `verify`, `wipe`, `tag`, `search`, `export`, `import`, `change-password`, `rotate`, `tui`, `gui`.
-- **Textual TUI** (`tui.py`): Keys, Health, Audit, Status panels.
-- **CustomTkinter GUI** (`gui.py`): Keys, Health, Settings tabs.
+- Textual TUI (`tui.py`): Keys, Health, Audit, Status panels.
+- CustomTkinter GUI (`gui.py`): Keys, Health, Settings tabs.
 - 6 test files totalling 84 tests.
 - `.github/workflows/ci.yml`: 9-combination matrix + bandit.
 - `SECURITY.md`, `CHANGELOG.md`.

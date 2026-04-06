@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "vaultkey"
-version = "1.4.0"
+version = "1.6.0"
 description = "Ultra-secure local API key wallet with AES-256-GCM, Argon2id, and HMAC integrity verification"
 authors = [{name = "VaultKey Contributors"}]
 license = {text = "MIT"}
@@ -34,6 +34,7 @@ dependencies = [
     "pyperclip>=1.9",
     "textual>=0.55",
     "customtkinter>=5.2",
+    "httpx>=0.27",
 ]
 
 [project.optional-dependencies]
