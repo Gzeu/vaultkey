@@ -13,7 +13,7 @@ from wallet.core.kdf import KDFParams, derive_key, hash_master_password
 from wallet.core.storage import WalletStorage
 from wallet.models.wallet import WalletPayload
 
-runner = CliRunner(mix_stderr=False)
+runner = CliRunner()
 
 
 @pytest.fixture(autouse=True)
