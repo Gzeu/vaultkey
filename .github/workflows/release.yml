@@ -7,28 +7,27 @@ on:
       - 'v[0-9]+.[0-9]+.[0-9]+-*'
 
 permissions:
-  contents: write      # create GitHub Release
-  id-token: write      # PyPI Trusted Publisher (OIDC)
+  contents: write
+  id-token: write
+  pages: write
 
 jobs:
-  # ── 1. Run full test suite before releasing ────────────────────────────────
+  # ── 1. Tests ───────────────────────────────────────────────────────────────────
   test:
     name: Test before release
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set up Python 3.12
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-
+          cache: pip
       - name: Install & test
         run: |
           pip install -e ".[dev]"
           pytest tests/ -v --tb=short
 
-  # ── 2. Build sdist + wheel ─────────────────────────────────────────────────
+  # ── 2. Build sdist + wheel ─────────────────────────────────────────────────────────
   build:
     name: Build distribution
     runs-on: ubuntu-latest
@@ -38,35 +37,28 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0   # need full history for changelog extraction
-
-      - name: Set up Python 3.12
-        uses: actions/setup-python@v5
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: pip
-
       - name: Install build tools
         run: pip install build hatchling twine
-
-      - name: Extract version from tag
+      - name: Extract version
         id: meta
         run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
-
-      - name: Build sdist and wheel
+      - name: Build
         run: python -m build
-
-      - name: Verify distribution
+      - name: Verify
         run: twine check dist/*
-
-      - name: Upload build artifacts
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: dist-${{ github.ref_name }}
           path: dist/
           retention-days: 5
 
-  # ── 3. Create GitHub Release with auto-generated notes ────────────────────
+  # ── 3. GitHub Release ──────────────────────────────────────────────────────────────
   github-release:
     name: GitHub Release
     runs-on: ubuntu-latest
@@ -75,28 +67,19 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
-      - name: Download build artifacts
+      - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
           name: dist-${{ github.ref_name }}
           path: dist/
-
-      - name: Extract changelog for this version
-        id: changelog
+      - name: Extract changelog
         run: |
           VERSION=${GITHUB_REF_NAME#v}
-          # Extract section for this version from CHANGELOG.md
           NOTES=$(awk "/^## \\[${VERSION}\\]/,/^## \\[/" CHANGELOG.md \
-            | head -n -1 \
-            | tail -n +2)
-          if [ -z "$NOTES" ]; then
-            NOTES="See [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md) for details."
-          fi
-          # Write to file to avoid quoting issues
+            | head -n -1 | tail -n +2)
+          [ -z "$NOTES" ] && NOTES="See CHANGELOG.md for details."
           echo "$NOTES" > release_notes.txt
-
-      - name: Create GitHub Release
+      - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
           name: "VaultKey ${{ github.ref_name }}"
@@ -108,47 +91,46 @@ jobs:
           make_latest: true
           prerelease: ${{ contains(github.ref_name, '-') }}
 
-  # ── 4. Publish to PyPI via Trusted Publisher (OIDC — no token needed) ──────
+  # ── 4. Publish to PyPI via PYPI_API_TOKEN (github-pages environment) ──────
   pypi-publish:
     name: Publish to PyPI
     runs-on: ubuntu-latest
-    needs: github-release
+    needs: [build, github-release]
+    environment:
+      name: github-pages
+      url: https://pypi.org/project/vaultkey/${{ needs.build.outputs.version }}
     steps:
-      - name: Download build artifacts
+      - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
           name: dist-${{ github.ref_name }}
           path: dist/
-
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
-        # Trusted Publisher = no PYPI_API_TOKEN needed
-        # Configure at: https://pypi.org/manage/project/vaultkey/settings/publishing/
+        with:
+          password: ${{ secrets.PYPI_API_TOKEN }}
 
-  # ── 5. Deploy docs after successful release ────────────────────────────────
+  # ── 5. Deploy MkDocs to GitHub Pages ─────────────────────────────────────────
   deploy-docs:
-    name: Deploy docs to GitHub Pages
+    name: Deploy docs
     runs-on: ubuntu-latest
     needs: pypi-publish
-    permissions:
-      contents: write
+    environment:
+      name: github-pages
+      url: https://gzeu.github.io/vaultkey
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-
+          cache: pip
       - name: Install MkDocs
         run: pip install mkdocs-material
-
-      - name: Configure git for gh-pages
+      - name: Configure git
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-
-      - name: Deploy docs
+      - name: Deploy
         run: mkdocs gh-deploy --force --clean
