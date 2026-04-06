@@ -23,7 +23,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Callable, Optional
 
 from wallet.models.wallet import APIKeyEntry, WalletPayload
-from wallet.utils.audit import log_event
+from wallet.utils.audit import audit_log
 
 
 @dataclass
@@ -65,7 +65,7 @@ def check_expiry(
             report.no_expiry.append(entry)
         elif entry.expires_at <= now:
             report.expired.append(entry)
-            log_event(
+            audit_log(
                 event="EXPIRY_ALERT",
                 status="EXPIRED",
                 key_name=entry.name,
@@ -74,7 +74,7 @@ def check_expiry(
         elif entry.expires_at <= threshold:
             report.warning.append(entry)
             days_left = (entry.expires_at - now).days
-            log_event(
+            audit_log(
                 event="EXPIRY_WARNING",
                 status="WARNING",
                 key_name=entry.name,
@@ -176,11 +176,11 @@ def watch_expiry(
             print(f"[{datetime.now(timezone.utc).strftime('%H:%M:%S')}] {report.summary()}")
             if report.expired:
                 for e in report.expired:
-                    print(f"  🔴 EXPIRED: {e.name} (expired {e.expires_at})")
+                    print(f"  \ud83d\udd34 EXPIRED: {e.name} (expired {e.expires_at})")
             if report.warning:
                 for e in report.warning:
                     days = (e.expires_at - datetime.now(timezone.utc)).days  # type: ignore
-                    print(f"  ⚠️  WARNING: {e.name} expires in {days}d")
+                    print(f"  \u26a0\ufe0f  WARNING: {e.name} expires in {days}d")
             time.sleep(interval_secs)
     except KeyboardInterrupt:
         print("\n[VaultKey] Watch stopped.")
