@@ -6,6 +6,45 @@ Versioning: [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.3.0] — Wave 6 (2026-04-06)
+
+### Added
+- **Complete TUI rewrite** (`wallet/ui/tui.py`) — 950 → 1,400 LOC, full feature parity with CLI:
+  - `AddKeyModal`: formular complet cu name, value (mascat), service, description, tags, expiry (YYYY-MM-DD), environment + buton **🎲 Generate** inline.
+  - `EditKeyModal`: editare service, description, tags, expiry, environment + dropdown status (active / revoked / expired / deprecated).
+  - `ConfirmDeleteModal`: dialog de confirmare cu text entry name înainte de ștergere destructivă.
+  - `KeyDetailModal`: view complet cu toate metadatele (health score, access count, last accessed, created, expiry) + buton **Copy Value** cu clipboard clear timer.
+  - `GeneratorModal`: generator criptografic (`secrets`) — lungime configurabilă (8–256), charset (all / alphanum / hex / alpha), copy direct la clipboard.
+- **Tab `⏰ Expiry`** (`ExpiryPanel`): toate cheile grupate în 4 secțiuni colorate — EXPIRED (roșu), Expiring ≤30 zile (galben), Valid (verde), Fără expiry — sortate după urgență.
+- **`StatusPanel` cu countdown live**: timer 1s cu `set_interval`, culori verde/galben/roșu la <5 min / <1 min; afișează unlock time, last activity, failed attempts, full config.
+- **`KeysPanel` toolbar vizual**: butoane `[+ Add]` `[✏ Edit]` `[🗑 Delete]` `[📋 Copy]` `[ℹ Info]` `[🎲 Generate]` direct deasupra tabelului.
+- **`AuditPanel`** upgrade: filtru live + buton Refresh; afișează ultimele 200 evenimente.
+- **Persistență add/edit/delete**: toate acțiunile apelează `storage.save()` imediat după modificare.
+- **Keyboard bindings complete**:
+  - `n` → AddKeyModal
+  - `e` → EditKeyModal pentru intrarea selectată
+  - `D` → ConfirmDeleteModal
+  - `Enter` / `c` → copy to clipboard
+  - `i` → KeyDetailModal
+  - `g` → GeneratorModal
+  - `/` → focus search input
+  - `r` → refresh keys table
+  - `L` → lock wallet și exit
+  - `q` / `Ctrl+C` → quit cu auto-lock
+
+### Changed
+- `wallet/__init__.py`: `__version__` bumped `1.2.0` → `1.3.0`.
+- `pyproject.toml`: `version` bumped `1.2.0` → `1.3.0`.
+- `TabbedContent` extins de la 4 la 5 tab-uri (Keys / Health / Expiry / Audit / Status).
+- `UnlockScreen` afișează acum contorul de tentative eșuate (`failed_attempts / max`).
+
+### Fixed
+- `KeysPanel.selected_entry()`: guard pentru `cursor_row >= len(filtered)` (IndexError prevention).
+- `ExpiryPanel.on_mount`: try/except per-table pentru robustețe când tab-urile lipsesc.
+- `StatusPanel._update_display`: try/except per-widget pentru stabilitate la resize rapid.
+
+---
+
 ## [1.2.0] — Wave 5 (2026-04-05)
 
 ### Added

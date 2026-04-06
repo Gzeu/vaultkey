@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "vaultkey"
-version = "1.2.0"
+version = "1.3.0"
 description = "Ultra-secure local API key wallet with AES-256-GCM, Argon2id, and HMAC integrity verification"
 authors = [{name = "VaultKey Contributors"}]
 license = {text = "MIT"}
