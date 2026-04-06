@@ -87,7 +87,7 @@ jobs:
           cache: pip
 
       - name: Install MkDocs
-        run: pip install mkdocs-material mkdocstrings[python]
+        run: pip install mkdocs-material
 
       - name: Verify required files exist
         run: |
@@ -95,11 +95,11 @@ jobs:
           test -f CHANGELOG.md
           test -f SECURITY.md
           test -f CONTRIBUTING.md
+          test -f mkdocs.yml
           echo "OK: required docs present"
 
       - name: Build MkDocs site (strict)
         run: mkdocs build --strict
-        working-directory: docs
 
   release-check:
     name: Release Readiness
