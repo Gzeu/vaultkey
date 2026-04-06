@@ -6,7 +6,7 @@
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Security](https://img.shields.io/badge/encryption-AES--256--GCM-red)](https://en.wikipedia.org/wiki/AES-GCM)
 [![Tests](https://img.shields.io/badge/tests-123%20passing-brightgreen)](#testing)
-[![Version](https://img.shields.io/badge/version-1.2.0-blue)](#changelog)
+[![Version](https://img.shields.io/badge/version-1.3.0-blue)](#changelog)
 
 ---
 
@@ -17,6 +17,9 @@ No cloud sync. No telemetry. No vendor lock-in. Your keys never leave your machi
 
 Every key is encrypted with a **unique per-entry subkey** derived via HKDF-SHA256 from your master key.  
 Compromising one entry reveals nothing about any other.
+
+**Three interfaces — one vault:**  
+`wallet` CLI for scripts · `wallet tui` full-screen terminal · `wallet gui` desktop app
 
 ---
 
@@ -52,7 +55,7 @@ wallet init
 wallet unlock
 
 # Add an API key
-wallet add --name "OpenAI Production" --tags "ai,production" --expires 2025-12-31
+wallet add --name "OpenAI Production" --tags "ai,production" --expires 2026-12-31
 
 # Copy to clipboard (auto-clears after 30 s)
 wallet get "OpenAI Production"
@@ -60,8 +63,14 @@ wallet get "OpenAI Production"
 # Health report across all keys
 wallet health
 
+# Check expiring keys (within 7 days)
+wallet expiry-check
+
 # Launch interactive TUI
 wallet tui
+
+# Launch desktop GUI
+wallet gui
 ```
 
 ---
@@ -95,6 +104,7 @@ wallet tui
 | `wallet list --expired` | Show only expired keys |
 | `wallet info <name>` | Full metadata + health score for one key |
 | `wallet rotate <name>` | Replace key value (new nonce, same entry ID) |
+| `wallet rename <name> --to <new>` | Rename a key (metadata-only, no re-encryption) |
 | `wallet delete <name>` | Delete with double confirmation |
 | `wallet tag <name> --add prod` | Add tags without re-encryption |
 | `wallet tag <name> --remove old` | Remove tags |
@@ -106,6 +116,9 @@ wallet tui
 |---|---|
 | `wallet health` | Wallet-wide health scores + rotation recommendations |
 | `wallet health --all` | Show all entries, not just problematic ones |
+| `wallet expiry-check` | List keys expiring within 7 days (color-coded urgency) |
+| `wallet expiry-check --days 30` | Custom look-ahead window |
+| `wallet expiry-check --all` | Show all expiry status, not just warnings |
 | `wallet audit` | View structured audit log (last 50 events) |
 | `wallet audit --event GET` | Filter by event type |
 | `wallet audit --failed` | Show only FAIL events |
@@ -118,13 +131,85 @@ wallet tui
 | `wallet export --output backup.enc` | Encrypted export with separate password |
 | `wallet import <file>` | Import keys from encrypted backup |
 | `wallet import <file> --on-conflict rename` | Conflict strategy: `skip` / `overwrite` / `rename` |
+| `wallet bulk-import <file>` | Import from `.env`, `.json`, or `.csv` |
+| `wallet bulk-import <file> --dry-run` | Preview what would be imported |
+| `wallet bulk-import <file> --on-conflict overwrite` | Conflict strategy for bulk ops |
 
 ### UI Launchers
 
 | Command | Description |
 |---|---|
 | `wallet tui` | Full-screen interactive TUI (Textual) |
-| `wallet gui` | Desktop GUI (customtkinter) |
+| `wallet gui` | Desktop GUI (CustomTkinter, dark mode) |
+
+---
+
+## Interfaces
+
+### CLI
+Standard terminal interface. All commands scriptable. `--raw` and `--env` flags for shell integration.
+
+### TUI (`wallet tui`)
+Full-screen Textual app — keyboard-driven, works over SSH. Live search, key detail pane, health view.
+
+### GUI (`wallet gui`)
+Desktop app built with CustomTkinter. **Dark mode only** — secrets should not be visible in bright environments.
+
+| Tab | Features |
+|---|---|
+| 🗝️ **Keys** | Scrollable card list · live search · Copy / Info / Delete · Add Key dialog |
+| 📊 **Health** | Overall grade (A–F) · per-entry scores · issues + recommendations |
+| ⚙️ **Settings** | Change password (full re-encryption) · Export encrypted backup · Audit log viewer |
+
+> API key values are **never displayed** in the GUI — only a masked prefix (`sk-...`).  
+> Copy sends directly to clipboard; clipboard auto-clears after `clipboard_clear_seconds`.
+
+---
+
+## Bulk Import
+
+Import keys from existing secrets files without manual entry:
+
+```bash
+# From a .env file
+wallet bulk-import .env --dry-run
+wallet bulk-import .env --on-conflict rename
+
+# From a JSON array
+wallet bulk-import keys.json
+
+# From a CSV with name,value columns
+wallet bulk-import secrets.csv --on-conflict skip
+```
+
+**Supported formats:**
+
+| Format | Detection | Expected shape |
+|---|---|---|
+| `.env` | Extension | `KEY=value` lines; service inferred from key name |
+| `.json` | Extension | Array of `{name, value, service?, tags?, description?}` |
+| `.csv` | Extension | Header row with `name` + `value` columns (others optional) |
+
+Conflict strategies: `skip` (default) · `overwrite` · `rename` (appends `_1`, `_2`…)
+
+---
+
+## Expiry Checker
+
+Auto-runs silently on `wallet unlock` — warns only if keys are near expiry.
+
+```bash
+wallet expiry-check            # keys expiring within 7 days (default)
+wallet expiry-check --days 30  # custom window
+wallet expiry-check --all      # full status table
+```
+
+| Urgency | Threshold | Color |
+|---|---|---|
+| `expired` | past due | 🔴 red |
+| `critical` | ≤ 3 days | 🟠 orange |
+| `warning` | ≤ 7 days | 🟡 yellow |
+| `info` | > 7 days | ⚪ gray |
 
 ---
 
@@ -149,7 +234,7 @@ wallet tui
 ├── wallet.enc          # Encrypted wallet binary (magic VKEY + Argon2 header + AES-GCM payload)
 ├── audit.log           # JSON-Lines audit trail (chmod 600)
 └── backups/
-    ├── wallet_20250101_120000.enc
+    ├── wallet_20260101_120000.enc
     └── ...             # Auto-pruned to last 20 backups (configurable)
 ```
 
@@ -162,6 +247,36 @@ wallet tui
 [N bytes]  kdf_params_json: Argon2id params + salt_hex
 [12 bytes] nonce: AES-GCM nonce
 [M bytes]  ciphertext: AES-GCM encrypted+authenticated payload
+```
+
+---
+
+## Project Structure
+
+```
+wallet/
+├── core/
+│   ├── crypto.py        # AES-256-GCM encrypt/decrypt, HKDF subkey derivation
+│   ├── health.py        # Per-entry + wallet-wide health scoring (A–F)
+│   ├── integrity.py     # HMAC-SHA256 manifest, structural checks
+│   ├── kdf.py           # Argon2id derive_key, hash/verify master password
+│   ├── session.py       # SessionManager — unlock, lock, timeout, brute-force
+│   ├── storage.py       # Binary wallet I/O, atomic writes, backups
+│   └── wipe.py          # Secure panic wipe
+├── models/
+│   ├── config.py        # WalletConfig — env vars, paths, timeouts
+│   └── wallet.py        # WalletPayload, APIKeyEntry dataclasses (v1.3)
+├── ui/
+│   ├── cli.py           # Typer CLI — all commands
+│   ├── gui.py           # CustomTkinter desktop GUI (Wave 4)
+│   └── tui.py           # Textual full-screen TUI
+└── utils/
+    ├── audit.py         # JSON-Lines audit log writer + reader
+    ├── bulk_import.py   # .env / .json / .csv bulk import (Wave 7)
+    ├── clipboard.py     # Cross-platform copy + auto-clear timer
+    ├── expiry_checker.py# Expiry warnings with urgency levels (Wave 7)
+    ├── prefix_detect.py # API key prefix → service auto-detection
+    └── validators.py    # Key name, value, expiry date validators
 ```
 
 ---
@@ -253,11 +368,21 @@ Full documentation available at **[gzeu.github.io/vaultkey](https://gzeu.github.
 
 ## Changelog
 
-### v1.2.0 — Wave 5 (current)
+### v1.3.0 — Wave 7 (current)
+- `wallet rename <name> --to <new>` — metadata-only rename, zero re-encryption
+- `wallet expiry-check [--days N] [--all]` — color-coded expiry warnings with urgency levels
+- `wallet bulk-import <file> [--on-conflict] [--dry-run]` — `.env` / `.json` / `.csv` import
+- Auto expiry check on `wallet unlock` — silent unless keys are near expiry
+- `WalletPayload.rename_entry()` — clean `KeyError` / `ValueError` on conflicts
+- `ExpiryWarning` frozen dataclass with sortable `urgency` property
+- `BulkImportResult` counters: added / skipped / overwritten / renamed / errors
+
+### v1.2.0 — Wave 5–6
 - 39 new tests: `test_health`, `test_prefix_detect`, `test_integrity`, 13 Hypothesis properties
-- Shared `conftest.py` with session-scoped Argon2id fixtures (Argon2id runs once per `pytest` invocation)
+- Shared `conftest.py` with session-scoped Argon2id fixtures
 - Full MkDocs documentation site with Material theme + mkdocstrings
 - `pyproject.toml` migrated to Hatchling / PEP 621 with full `ruff`, `mypy`, `bandit`, `hypothesis` config
+- Badges: version, tests passing
 
 ### v1.1.0 — Wave 3–4
 - `wallet health` — per-entry health scores + rotation recommendations
@@ -265,6 +390,8 @@ Full documentation available at **[gzeu.github.io/vaultkey](https://gzeu.github.
 - `wallet verify` — structural + HMAC integrity check
 - `wallet wipe` — panic wipe with multi-step confirmation
 - `wallet tag`, `wallet search`, `wallet rotate` — key lifecycle commands
+- Desktop GUI (CustomTkinter) — Keys / Health / Settings tabs
+- TUI rewrite (Textual) — keyboard-driven full-screen interface
 - Session brute-force protection (exponential backoff, FIX #1 deadlock resolved)
 - HKDF explicit domain salt (FIX #6, RFC 5869 §3.1)
 - Windows permission check via `icacls` (FIX #5)
