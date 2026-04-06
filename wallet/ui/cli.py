@@ -5,18 +5,22 @@ All commands require an unlocked session except: init, unlock, status, verify.
 Sensitive input (master password, API key value) always prompted with echo=False.
 
 Wave 3 additions:
-  - `wallet health`   — per-entry health scores + overall grade
-  - `wallet audit`    — human-readable audit log viewer with filtering
-  - `wallet verify`   — structural + HMAC integrity check
-  - `wallet wipe`     — panic wipe with multi-step confirmation
-  - `wallet search`   — fuzzy search alias (delegates to list)
-  - `wallet tag`      — add/remove tags without touching crypto
+  - `wallet health`         — per-entry health scores + overall grade
+  - `wallet audit`          — human-readable audit log viewer with filtering
+  - `wallet verify`         — structural + HMAC integrity check
+  - `wallet wipe`           — panic wipe with multi-step confirmation
+  - `wallet search`         — fuzzy search alias (delegates to list)
+  - `wallet tag`            — add/remove tags without touching crypto
   - All commands emit audit_log() events consistently.
 
 Wave 6 additions:
-  - `wallet duplicate <name>` — clone an entry under a new ID + new nonce.
-    Zero re-encryption cost: decrypts once, encrypts once under a fresh UUID.
-    Useful for staging vs. prod keys that share the same service.
+  - `wallet duplicate <name>` — clone an entry under a new UUID + new nonce.
+
+Wave 7 additions:
+  - `wallet rename <name> --to <new-name>` — metadata-only rename (no re-encryption).
+  - `wallet expiry-check [--days N]`       — show keys expiring within N days.
+    Auto-runs at unlock (silent unless warnings exist).
+  - `wallet bulk-import <file>`            — import keys from .env / .json / .csv.
 """
 
 import json
@@ -112,6 +116,23 @@ def _grade_color(grade: str) -> str:
             "D": "orange1", "F": "red"}.get(grade, "white")
 
 
+def _urgency_color(urgency: str) -> str:
+    return {"expired": "red", "critical": "orange1",
+            "warning": "yellow", "info": "cyan"}.get(urgency, "white")
+
+
+def _run_expiry_check_silent(payload: WalletPayload) -> None:
+    """Auto-check run at unlock — prints warnings only if entries are near expiry."""
+    from wallet.utils.expiry_checker import check_expiry
+    warnings = check_expiry(payload, days=7)
+    if not warnings:
+        return
+    console.print(
+        f"[yellow]⚠ {len(warnings)} key(s) expiring within 7 days. "
+        "Run [bold]wallet expiry-check[/bold] for details.[/yellow]"
+    )
+
+
 # ------------------------------------------------------------------ #
 # Commands — Wallet Lifecycle
 # ------------------------------------------------------------------ #
@@ -176,11 +197,15 @@ def unlock() -> None:
 
     session.unlock(key)
     info = session.info
+    secs = info.get("seconds_until_lock")
     console.print(
         f"[green]✓ Unlocked.[/green] "
-        f"[dim]Auto-locks in {cfg.session_timeout_minutes} min "
-        f"({info.get('seconds_until_lock', '')}s remaining).[/dim]"
+        f"[dim]Auto-locks in {cfg.session_timeout_minutes} min"
+        + (f" ({secs}s remaining)[/dim]" if secs is not None else ".[/dim]")
     )
+
+    # Wave 7: silent expiry check at unlock
+    _run_expiry_check_silent(payload)
 
 
 @app.command()
@@ -392,6 +417,42 @@ def delete(name: str = typer.Argument(...)) -> None:
 
 
 @app.command()
+def rename(
+    name: str = typer.Argument(..., help="Current key name or ID"),
+    new_name: str = typer.Option(..., "--to", "-n", help="New name for the entry"),
+) -> None:
+    """Rename an entry without re-encrypting the key value.
+
+    This is a metadata-only operation: the UUID and encrypted ciphertext
+    remain identical, so no re-encryption cost is incurred.
+
+    Example:
+        wallet rename "Stripe Test" --to "Stripe Production"
+    """
+    key = _require_unlocked()
+    payload = _load_payload(key)
+    params = storage.read_kdf_params()
+
+    try:
+        new_name_validated = validate_key_name(new_name)
+        entry = payload.rename_entry(name, new_name_validated)
+    except KeyError:
+        console.print(f"[red]❌ Key '{name}' not found.[/red]")
+        raise typer.Exit(1)
+    except ValueError as e:
+        console.print(f"[red]❌ {e}[/red]")
+        raise typer.Exit(1)
+
+    _save_payload(payload, key, params)
+    audit_log("RENAME", key_name=new_name_validated, status="OK",
+              extra=f"from={name}")
+    console.print(
+        f"[green]✓ Renamed:[/green] "
+        f"[bold]{name}[/bold] → [bold]{new_name_validated}[/bold]"
+    )
+
+
+@app.command()
 def info(name: str = typer.Argument(...)) -> None:
     """Show full metadata for a key (value never shown)."""
     key = _require_unlocked()
@@ -465,9 +526,6 @@ def duplicate(
     The cloned entry inherits all metadata (service, tags, description,
     expiry) but starts with access_count=0 and a new created_at timestamp.
 
-    Useful for maintaining separate staging and production keys for the
-    same service without re-entering the key value.
-
     Example:
         wallet duplicate "OpenAI Production" --as "OpenAI Staging"
     """
@@ -480,7 +538,6 @@ def duplicate(
         console.print(f"[red]❌ Key '{name}' not found.[/red]")
         raise typer.Exit(1)
 
-    # Determine new name
     if not new_name:
         suggested = f"{source.name} (copy)"
         new_name = validate_key_name(
@@ -493,7 +550,6 @@ def duplicate(
         console.print(f"[red]❌ An entry named '{new_name}' already exists.[/red]")
         raise typer.Exit(1)
 
-    # Decrypt the source value
     raw_value = decrypt_entry_value(
         key,
         source.id,
@@ -501,7 +557,6 @@ def duplicate(
         bytes.fromhex(source.cipher_hex),
     )
 
-    # Re-encrypt under a new UUID — new UUID ⇒ new HKDF subkey domain
     new_id = str(uuid.uuid4())
     new_nonce, new_cipher = encrypt_entry_value(key, new_id, raw_value)
 
@@ -517,7 +572,7 @@ def duplicate(
         expires_at=source.expires_at,
         created_at=datetime.now(timezone.utc),
         is_active=source.is_active,
-        rotation_days=source.rotation_days,
+        rotation_reminder_days=source.rotation_reminder_days,
     )
 
     payload.add_entry(clone)
@@ -584,6 +639,148 @@ def search(query: str = typer.Argument(...)) -> None:
 # ------------------------------------------------------------------ #
 # Commands — Security & Maintenance
 # ------------------------------------------------------------------ #
+
+@app.command(name="expiry-check")
+def expiry_check(
+    days: int = typer.Option(7, "--days", "-d", help="Warning horizon in days"),
+    all_entries: bool = typer.Option(False, "--all", "-a", help="Include already-expired keys"),
+) -> None:
+    """Show API keys expiring within the next N days.
+
+    By default shows keys expiring within 7 days. Use --days 30 for
+    a broader sweep. Urgency levels: critical (≤3d), warning (≤7d), info (>7d).
+
+    Also runs automatically (silent) each time the wallet is unlocked.
+
+    Example:
+        wallet expiry-check --days 30
+    """
+    key = _require_unlocked()
+    payload = _load_payload(key)
+
+    from wallet.utils.expiry_checker import check_expiry
+    warnings = check_expiry(payload, days=days)
+
+    if not all_entries:
+        warnings = [w for w in warnings if not w.is_expired]
+
+    if not warnings:
+        console.print(f"[green]✓ No keys expiring within {days} day(s).[/green]")
+        raise typer.Exit(0)
+
+    table = Table(box=box.ROUNDED, header_style="bold", show_header=True)
+    table.add_column("Name", style="bold")
+    table.add_column("Service")
+    table.add_column("Expires", justify="center")
+    table.add_column("Days left", justify="right")
+    table.add_column("Urgency", justify="center")
+
+    for w in warnings:
+        uc = _urgency_color(w.urgency)
+        days_str = "EXPIRED" if w.is_expired else str(w.days_left)
+        table.add_row(
+            w.name,
+            w.service,
+            w.expires_at.strftime("%Y-%m-%d"),
+            f"[{uc}]{days_str}[/{uc}]",
+            f"[{uc}]{w.urgency}[/{uc}]",
+        )
+
+    console.print(table)
+    console.print(f"[dim]{len(warnings)} key(s) found[/dim]")
+
+
+@app.command(name="bulk-import")
+def bulk_import(
+    file: str = typer.Argument(..., help="Path to .env, .json, or .csv file"),
+    strategy: str = typer.Option(
+        "rename", "--on-conflict",
+        help="skip | overwrite | rename (default: rename)",
+    ),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Parse only — do not save"),
+) -> None:
+    """Import API keys from a .env, JSON, or CSV file.
+
+    Supported formats:
+      .env   — KEY_NAME=value lines (# comments skipped)
+      .json  — [{"name", "value", "service", "tags", "description", "expires"}]
+      .csv   — header row with at least 'name' and 'value' columns
+
+    Conflict strategies:
+      skip       — leave existing entries unchanged
+      overwrite  — replace value in-place (same UUID, new nonce)
+      rename     — append _imported_N suffix (default)
+
+    Examples:
+        wallet bulk-import .env
+        wallet bulk-import keys.json --on-conflict overwrite
+        wallet bulk-import keys.csv --dry-run
+    """
+    key = _require_unlocked()
+    payload = _load_payload(key)
+    params = storage.read_kdf_params()
+
+    src = Path(file)
+    if not src.exists():
+        console.print(f"[red]❌ File not found: {file}[/red]")
+        raise typer.Exit(1)
+
+    valid_strategies = ("skip", "overwrite", "rename")
+    if strategy not in valid_strategies:
+        console.print(f"[red]❌ Invalid strategy '{strategy}'. Use: {', '.join(valid_strategies)}[/red]")
+        raise typer.Exit(1)
+
+    from wallet.utils.bulk_import import apply_bulk_import, parse_file
+
+    try:
+        raw_entries = parse_file(src)
+    except ValueError as e:
+        console.print(f"[red]❌ Parse error: {e}[/red]")
+        raise typer.Exit(1)
+
+    console.print(f"[dim]Parsed {len(raw_entries)} entries from {src.name}[/dim]")
+
+    if dry_run:
+        table = Table(box=box.SIMPLE, header_style="bold cyan")
+        table.add_column("Name")
+        table.add_column("Service")
+        table.add_column("Tags")
+        table.add_column("Expires")
+        for r in raw_entries:
+            table.add_row(r.name, r.service or "—", r.tags or "—", r.expires or "—")
+        console.print(table)
+        console.print("[yellow]Dry run — nothing saved.[/yellow]")
+        raise typer.Exit(0)
+
+    result = apply_bulk_import(
+        raw_entries, payload, key, strategy=strategy  # type: ignore[arg-type]
+    )
+
+    if result.errors:
+        for err in result.errors:
+            console.print(f"[yellow]⚠ {err}[/yellow]")
+
+    _save_payload(payload, key, params)
+    audit_log(
+        "BULK_IMPORT",
+        status="OK",
+        extra=(
+            f"file={src.name},added={result.added},"
+            f"overwritten={result.overwritten},renamed={result.renamed},"
+            f"skipped={result.skipped}"
+        ),
+    )
+
+    lines = [
+        f"Added:       [green]{result.added}[/green]",
+        f"Overwritten: [cyan]{result.overwritten}[/cyan]",
+        f"Renamed:     [blue]{result.renamed}[/blue]",
+        f"Skipped:     [dim]{result.skipped}[/dim]",
+    ]
+    if result.errors:
+        lines.append(f"Errors:      [red]{len(result.errors)}[/red]")
+    console.print(Panel("\n".join(lines), title=f"✓ Bulk Import — {src.name}", expand=False))
+
 
 @app.command()
 def health(

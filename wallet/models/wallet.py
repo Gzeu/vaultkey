@@ -9,6 +9,8 @@ Design decisions:
   - Verified on load when enable_integrity_check=True.
 - WalletPayload.search() supports fuzzy substring matching on name, service, tags.
 - rotation_reminder_days: default 90 — triggers 'expiring' status label warning.
+- WalletPayload.rename_entry() added in Wave 7: renames an entry without
+  re-encrypting the key value (metadata-only change).
 """
 
 import uuid
@@ -83,7 +85,7 @@ class APIKeyEntry(BaseModel):
 class WalletPayload(BaseModel):
     model_config = ConfigDict(strict=False)
 
-    version: str = "1.1"
+    version: str = "1.2"
     master_hash: str
     created_at: datetime = Field(default_factory=_now_utc)
     modified_at: datetime = Field(default_factory=_now_utc)
@@ -113,6 +115,35 @@ class WalletPayload(BaseModel):
             self.touch()
             return True
         return False
+
+    def rename_entry(self, name_or_id: str, new_name: str) -> APIKeyEntry:
+        """
+        Rename an entry in-place without touching encrypted data.
+
+        This is a metadata-only operation — nonce_hex and cipher_hex are
+        unchanged because the encryption domain is keyed by UUID, not name.
+
+        Args:
+            name_or_id: Current name or UUID of the entry.
+            new_name:   Target name (must pass validate_key_name before calling).
+
+        Returns:
+            The mutated APIKeyEntry.
+
+        Raises:
+            KeyError: Entry not found.
+            ValueError: new_name already taken by another entry.
+        """
+        entry = self.get_entry(name_or_id)
+        if entry is None:
+            raise KeyError(f"Entry '{name_or_id}' not found.")
+        conflict = self.get_entry(new_name)
+        if conflict and conflict.id != entry.id:
+            raise ValueError(f"An entry named '{new_name}' already exists.")
+        entry.name = new_name
+        entry.updated_at = _now_utc()
+        self.touch()
+        return entry
 
     def search(
         self,
