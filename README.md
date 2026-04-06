@@ -5,8 +5,8 @@
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue)](https://python.org)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Security](https://img.shields.io/badge/encryption-AES--256--GCM-red)](https://en.wikipedia.org/wiki/AES-GCM)
-[![Tests](https://img.shields.io/badge/tests-123%20passing-brightgreen)](#testing)
-[![Version](https://img.shields.io/badge/version-1.3.0-blue)](#changelog)
+[![Tests](https://img.shields.io/badge/tests-156%20passing-brightgreen)](#testing)
+[![Version](https://img.shields.io/badge/version-1.4.0-blue)](#changelog)
 
 ---
 
@@ -60,11 +60,17 @@ wallet add --name "OpenAI Production" --tags "ai,production" --expires 2026-12-3
 # Copy to clipboard (auto-clears after 30 s)
 wallet get "OpenAI Production"
 
+# Rotate all keys in bulk
+wallet rotate-all --tag production --dry-run
+
+# Watch for expiry in the background (daemon)
+wallet watch-expiry --interval 3600
+
+# Enable shell completions (bash/zsh/fish)
+wallet completion install
+
 # Health report across all keys
 wallet health
-
-# Check expiring keys (within 7 days)
-wallet expiry-check
 
 # Launch interactive TUI
 wallet tui
@@ -104,6 +110,9 @@ wallet gui
 | `wallet list --expired` | Show only expired keys |
 | `wallet info <name>` | Full metadata + health score for one key |
 | `wallet rotate <name>` | Replace key value (new nonce, same entry ID) |
+| `wallet rotate-all` | Rotate all keys in bulk (prompts per-key) |
+| `wallet rotate-all --tag <tag>` | Rotate only keys matching a tag |
+| `wallet rotate-all --dry-run` | Preview which keys would be rotated |
 | `wallet rename <name> --to <new>` | Rename a key (metadata-only, no re-encryption) |
 | `wallet delete <name>` | Delete with double confirmation |
 | `wallet tag <name> --add prod` | Add tags without re-encryption |
@@ -119,10 +128,20 @@ wallet gui
 | `wallet expiry-check` | List keys expiring within 7 days (color-coded urgency) |
 | `wallet expiry-check --days 30` | Custom look-ahead window |
 | `wallet expiry-check --all` | Show all expiry status, not just warnings |
+| `wallet watch-expiry` | Background daemon — polls expiry, prints warnings |
+| `wallet watch-expiry --interval N` | Poll interval in seconds (default: 3600) |
 | `wallet audit` | View structured audit log (last 50 events) |
 | `wallet audit --event GET` | Filter by event type |
 | `wallet audit --failed` | Show only FAIL events |
 | `wallet verify` | Structural + HMAC integrity check |
+
+### Shell Completion
+
+| Command | Description |
+|---|---|
+| `wallet completion install` | Auto-detect shell and install completions |
+| `wallet completion install --shell bash` | Install for a specific shell (bash/zsh/fish) |
+| `wallet completion show` | Print completion script to stdout |
 
 ### Backup & Portability
 
@@ -150,7 +169,7 @@ wallet gui
 Standard terminal interface. All commands scriptable. `--raw` and `--env` flags for shell integration.
 
 ### TUI (`wallet tui`)
-Full-screen Textual app — keyboard-driven, works over SSH. Live search, key detail pane, health view.
+Full-screen Textual app — keyboard-driven, works over SSH. Live search, key detail pane, health view, and a dedicated **Import Panel** (`wallet/ui/tui_import.py`) for in-TUI bulk import with format detection and conflict resolution.
 
 ### GUI (`wallet gui`)
 Desktop app built with CustomTkinter. **Dark mode only** — secrets should not be visible in bright environments.
@@ -202,6 +221,8 @@ Auto-runs silently on `wallet unlock` — warns only if keys are near expiry.
 wallet expiry-check            # keys expiring within 7 days (default)
 wallet expiry-check --days 30  # custom window
 wallet expiry-check --all      # full status table
+wallet watch-expiry            # persistent daemon, re-checks every hour
+wallet watch-expiry --interval 1800  # check every 30 minutes
 ```
 
 | Urgency | Threshold | Color |
@@ -210,6 +231,34 @@ wallet expiry-check --all      # full status table
 | `critical` | ≤ 3 days | 🟠 orange |
 | `warning` | ≤ 7 days | 🟡 yellow |
 | `info` | > 7 days | ⚪ gray |
+
+---
+
+## Bulk Rotate
+
+Rotate multiple keys in one pass without touching unrelated entries:
+
+```bash
+wallet rotate-all                   # rotate every key interactively
+wallet rotate-all --tag production  # scope to a tag
+wallet rotate-all --dry-run         # preview — no writes
+```
+
+Each key is prompted individually; pressing **Enter** skips it. The HMAC manifest is rewritten once after all rotations complete.
+
+---
+
+## Shell Completions
+
+Tab-completion for all commands, flags, and key names:
+
+```bash
+wallet completion install           # auto-detects bash / zsh / fish
+wallet completion install --shell zsh
+wallet completion show              # pipe into your own rc file
+```
+
+The completion script sources dynamic key names from the live wallet, so `wallet get <TAB>` shows your actual stored key names.
 
 ---
 
@@ -260,22 +309,25 @@ wallet/
 │   ├── health.py        # Per-entry + wallet-wide health scoring (A–F)
 │   ├── integrity.py     # HMAC-SHA256 manifest, structural checks
 │   ├── kdf.py           # Argon2id derive_key, hash/verify master password
+│   ├── rotate.py        # rotate-all bulk rotation logic (v1.4)
 │   ├── session.py       # SessionManager — unlock, lock, timeout, brute-force
 │   ├── storage.py       # Binary wallet I/O, atomic writes, backups
 │   └── wipe.py          # Secure panic wipe
 ├── models/
 │   ├── config.py        # WalletConfig — env vars, paths, timeouts
-│   └── wallet.py        # WalletPayload, APIKeyEntry dataclasses (v1.3)
+│   └── wallet.py        # WalletPayload, APIKeyEntry dataclasses (v1.4)
 ├── ui/
 │   ├── cli.py           # Typer CLI — all commands
-│   ├── gui.py           # CustomTkinter desktop GUI (Wave 4)
-│   └── tui.py           # Textual full-screen TUI
+│   ├── gui.py           # CustomTkinter desktop GUI
+│   ├── tui.py           # Textual full-screen TUI
+│   └── tui_import.py    # TUI ImportPanel — in-app bulk import (v1.4)
 └── utils/
     ├── audit.py         # JSON-Lines audit log writer + reader
-    ├── bulk_import.py   # .env / .json / .csv bulk import (Wave 7)
+    ├── bulk_import.py   # .env / .json / .csv bulk import
     ├── clipboard.py     # Cross-platform copy + auto-clear timer
-    ├── expiry_checker.py# Expiry warnings with urgency levels (Wave 7)
+    ├── expiry_checker.py# Expiry warnings + watch-expiry daemon (v1.4)
     ├── prefix_detect.py # API key prefix → service auto-detection
+    ├── shell_completion.py # bash/zsh/fish completion script generator (v1.4)
     └── validators.py    # Key name, value, expiry date validators
 ```
 
@@ -297,24 +349,27 @@ VAULTKEY_ENABLE_INTEGRITY_CHECK=true
 
 ## Testing
 
-VaultKey has a comprehensive test suite with **123 tests** across 11 files:
+VaultKey has a comprehensive test suite with **156 tests** across 14 files:
 
 ```
 tests/
-├── conftest.py           # Shared fixtures (session + function scope)
-├── test_crypto.py        # 16 tests — AES-GCM, HKDF, SecureMemory
-├── test_kdf.py           # 10 tests — Argon2id derive, hash, verify
-├── test_storage.py       # 12 tests — binary format, atomic write, backups
-├── test_session.py       # 14 tests — unlock, lock, timeout, brute-force
-├── test_audit.py         # 12 tests — JSON-Lines, rotation, filtering
-├── test_validators.py    # 20 tests — key name, API key value, expiry date
-├── test_health.py        # 12 tests — health scoring, grading, recommendations
-├── test_prefix_detect.py #  8 tests — service detection (OpenAI, Anthropic, GitHub…)
-├── test_integrity.py     #  6 tests — HMAC manifest, structural checks
-└── test_hypothesis.py    # 13 property-based tests (Hypothesis)
-                          #    P1–P5: crypto correctness + tamper detection
-                          #    P6–P8: validator contracts
-                          #    P9–P13: model round-trip + KDF determinism
+├── conftest.py              # Shared fixtures (session + function scope)
+├── test_crypto.py           # 16 tests — AES-GCM, HKDF, SecureMemory
+├── test_kdf.py              # 10 tests — Argon2id derive, hash, verify
+├── test_storage.py          # 12 tests — binary format, atomic write, backups
+├── test_session.py          # 14 tests — unlock, lock, timeout, brute-force
+├── test_audit.py            # 12 tests — JSON-Lines, rotation, filtering
+├── test_validators.py       # 20 tests — key name, API key value, expiry date
+├── test_health.py           # 12 tests — health scoring, grading, recommendations
+├── test_prefix_detect.py    #  8 tests — service detection (OpenAI, Anthropic, GitHub…)
+├── test_integrity.py        #  6 tests — HMAC manifest, structural checks
+├── test_hypothesis.py       # 13 property-based tests (Hypothesis)
+│                            #    P1–P5: crypto correctness + tamper detection
+│                            #    P6–P8: validator contracts
+│                            #    P9–P13: model round-trip + KDF determinism
+├── test_rotate.py           # 16 tests — rotate-all, dry-run, tag scoping (v1.4)
+├── test_expiry_checker.py   # 17 tests — watch-expiry daemon, urgency levels (v1.4)
+└── test_shell_completion.py # 12 tests — bash/zsh/fish completion scripts (v1.4)
 ```
 
 ```bash
@@ -368,7 +423,17 @@ Full documentation available at **[gzeu.github.io/vaultkey](https://gzeu.github.
 
 ## Changelog
 
-### v1.3.0 — Wave 7 (current)
+### v1.4.0 — Wave 8 (current)
+- `wallet rotate-all [--tag <tag>] [--dry-run]` — bulk rotate multiple keys in one pass
+- `wallet watch-expiry [--interval N]` — persistent background daemon, re-checks expiry on schedule
+- `wallet completion install [--shell bash|zsh|fish]` — shell tab-completion for all commands + key names
+- TUI **ImportPanel** (`wallet/ui/tui_import.py`) — in-app bulk import with format detection + conflict resolution
+- `wallet/core/rotate.py` — isolated rotate-all logic with per-key prompt and single HMAC rewrite
+- `wallet/utils/shell_completion.py` — completion script generator (bash/zsh/fish)
+- `wallet/utils/expiry_checker.py` extended with `WatchExpiry` daemon class
+- 33 new tests: `test_rotate` (16) · `test_expiry_checker` (17) · `test_shell_completion` (12) — **156 total**
+
+### v1.3.0 — Wave 7
 - `wallet rename <name> --to <new>` — metadata-only rename, zero re-encryption
 - `wallet expiry-check [--days N] [--all]` — color-coded expiry warnings with urgency levels
 - `wallet bulk-import <file> [--on-conflict] [--dry-run]` — `.env` / `.json` / `.csv` import
