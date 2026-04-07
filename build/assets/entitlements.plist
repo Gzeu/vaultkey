@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- Allow JIT compilation (needed by some cryptography operations) -->
+  <key>com.apple.security.cs.allow-jit</key>
+  <false/>
+  <!-- Allow unsigned executable memory -->
+  <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+  <false/>
+  <!-- Disable Library Validation so PyInstaller-bundled dylibs load correctly -->
+  <key>com.apple.security.cs.disable-library-validation</key>
+  <true/>
+  <!-- Keychain / clipboard access -->
+  <key>com.apple.security.cs.allow-dyld-environment-variables</key>
+  <true/>
+  <!-- Hardened runtime -->
+  <key>com.apple.security.app-sandbox</key>
+  <false/>
+</dict>
+</plist>
