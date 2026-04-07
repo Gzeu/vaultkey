@@ -60,7 +60,7 @@ def check_expiry(
     now = datetime.now(timezone.utc)
     threshold = now + timedelta(days=warn_days)
 
-    for entry in payload.entries:
+    for entry in payload.keys.values():  # fix: was payload.entries
         if entry.expires_at is None:
             report.no_expiry.append(entry)
         elif entry.expires_at <= now:
