@@ -1,142 +1,88 @@
 # -*- mode: python ; coding: utf-8 -*-
 # VaultKey CLI — PyInstaller spec
-# Produces: vaultkey-cli (or vaultkey-cli.exe on Windows)
-# Usage: pyinstaller build/pyinstaller/vaultkey-cli.spec
+# Produces: vaultkey-cli (single-file, no console window on Windows)
 
 import sys
 from pathlib import Path
 
 ROOT = Path(SPECPATH).parent.parent
-BLOCK_CIPHER = None
-
-# ── Hidden imports required for cryptography + argon2-cffi ─────────────────────
-HIDDEN_IMPORTS = [
-    # cryptography / OpenSSL backend
-    "cryptography",
-    "cryptography.hazmat.primitives.ciphers.aead",
-    "cryptography.hazmat.primitives.kdf.hkdf",
-    "cryptography.hazmat.primitives.kdf.scrypt",
-    "cryptography.hazmat.primitives.hashes",
-    "cryptography.hazmat.primitives.hmac",
-    "cryptography.hazmat.backends",
-    "cryptography.hazmat.backends.openssl",
-    "cryptography.hazmat.backends.openssl.backend",
-    "cryptography.hazmat.bindings._rust",
-    "cryptography.hazmat.bindings._rust.openssl",
-    # argon2-cffi
-    "argon2",
-    "argon2._utils",
-    "argon2.low_level",
-    "argon2._typing",
-    # pydantic v2
-    "pydantic",
-    "pydantic.v1",
-    "pydantic_core",
-    "pydantic_settings",
-    # typer / rich / click
-    "typer",
-    "rich",
-    "rich.console",
-    "rich.table",
-    "rich.panel",
-    "rich.prompt",
-    "rich.progress",
-    "rich.syntax",
-    "rich.traceback",
-    "click",
-    "click_completion",
-    # pyperclip
-    "pyperclip",
-    # httpx (webhooks)
-    "httpx",
-    "httpx._transports.default",
-    # stdlib used by wallet
-    "json",
-    "os",
-    "sys",
-    "pathlib",
-    "logging",
-    "datetime",
-    "uuid",
-    "base64",
-    "hmac",
-    "hashlib",
-    "secrets",
-    "struct",
-    "ctypes",
-    "threading",
-    "tempfile",
-    "shutil",
-    "platform",
-    # wallet internal
-    "wallet",
-    "wallet.core",
-    "wallet.core.crypto",
-    "wallet.core.kdf",
-    "wallet.core.session",
-    "wallet.core.storage",
-    "wallet.core.integrity",
-    "wallet.core.health",
-    "wallet.core.rotate",
-    "wallet.core.wipe",
-    "wallet.models",
-    "wallet.utils",
-    "wallet.ui.cli",
-]
-
-# ── Collect data files (Textual CSS, etc. — not needed for CLI but safe to add) ──
-DATAS = [
-    (str(ROOT / "wallet"), "wallet"),
-]
 
 a = Analysis(
-    [str(ROOT / "wallet" / "ui" / "cli.py")],
+    [str(ROOT / 'wallet' / 'ui' / 'cli.py')],
     pathex=[str(ROOT)],
     binaries=[],
-    datas=DATAS,
-    hiddenimports=HIDDEN_IMPORTS,
-    hookspath=[str(ROOT / "build" / "hooks")],
+    datas=[
+        # argon2-cffi needs its _ffi_bindings
+        (str(ROOT / '.venv' / 'Lib' / 'site-packages' / 'argon2') if sys.platform == 'win32'
+         else str(ROOT / '.venv' / 'lib'), 'argon2'),
+    ],
+    hiddenimports=[
+        'argon2._utils',
+        'argon2._ffi',
+        'cryptography.hazmat.primitives.ciphers.aead',
+        'cryptography.hazmat.primitives.kdf.hkdf',
+        'cryptography.hazmat.primitives.hmac',
+        'cryptography.hazmat.backends.openssl',
+        'cryptography.hazmat.bindings._rust',
+        'rich.logging',
+        'rich.traceback',
+        'typer',
+        'click',
+        'pyperclip',
+        'pydantic',
+        'pydantic_settings',
+        'httpx',
+        'wallet.core.crypto',
+        'wallet.core.kdf',
+        'wallet.core.session',
+        'wallet.core.storage',
+        'wallet.core.integrity',
+        'wallet.core.health',
+        'wallet.core.rotate',
+        'wallet.core.wipe',
+        'wallet.models',
+        'wallet.utils',
+    ],
+    hookspath=['build/pyinstaller/hooks'],
     hooksconfig={},
-    runtime_hooks=[str(ROOT / "build" / "hooks" / "rthook_cryptography.py")],
+    runtime_hooks=[],
     excludes=[
-        "textual",
-        "customtkinter",
-        "tkinter",
-        "_tkinter",
-        "matplotlib",
-        "numpy",
-        "pandas",
-        "PIL",
-        "test",
-        "unittest",
+        'textual',
+        'customtkinter',
+        'tkinter',
+        '_tkinter',
+        'PIL',
+        'matplotlib',
+        'numpy',
+        'scipy',
+        'IPython',
+        'jupyter',
+        'notebook',
     ],
     noarchive=False,
     optimize=2,
 )
 
-pyz = PYZ(a.pure, a.zipped_data, cipher=BLOCK_CIPHER)
+pyz = PYZ(a.pure)
 
 exe = EXE(
     pyz,
     a.scripts,
     a.binaries,
-    a.zipfiles,
     a.datas,
     [],
-    name="vaultkey-cli",
+    name='vaultkey',
     debug=False,
     bootloader_ignore_signals=False,
     strip=True,
     upx=True,
-    upx_exclude=["vcruntime140.dll", "python3.dll"],
+    upx_exclude=[],
     runtime_tmpdir=None,
-    console=True,          # CLI must be console app
+    console=True,          # CLI needs console
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=str(ROOT / "build" / "assets" / "vaultkey.ico") if sys.platform == "win32"
-         else str(ROOT / "build" / "assets" / "vaultkey.icns") if sys.platform == "darwin"
-         else None,
+    icon=str(ROOT / 'docs' / 'assets' / 'icon.ico') if (ROOT / 'docs' / 'assets' / 'icon.ico').exists() else None,
 )

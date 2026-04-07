@@ -1,142 +1,124 @@
 # VaultKey — Build System
 
-This directory contains everything needed to produce distributable binaries for
-Windows, Linux, and macOS.
-
-## Directory Structure
-
-```
-build/
-├── pyinstaller/          # PyInstaller .spec files (primary build method)
-│   ├── vaultkey-cli.spec     # CLI-only binary (~15–25 MB)
-│   ├── vaultkey-tui.spec     # TUI binary (Textual included, ~30–45 MB)
-│   └── vaultkey-gui.spec     # GUI binary (CustomTkinter, ~40–60 MB)
-├── hooks/                # Custom PyInstaller collection hooks
-│   ├── hook-cryptography.py  # OpenSSL bindings collector
-│   ├── hook-argon2.py        # argon2-cffi Rust extension collector
-│   ├── hook-pydantic.py      # pydantic-core Rust extension collector
-│   └── rthook_cryptography.py  # Runtime hook: sets DYLD/LD paths
-├── nuitka/
-│   └── build-nuitka.sh       # Nuitka alternative (smaller, faster output)
-├── scripts/
-│   ├── build-linux.sh        # Linux → ELF binary + AppImage
-│   ├── build-macos.sh        # macOS → .app bundle + DMG
-│   └── build-windows.ps1     # Windows → .exe files
-├── assets/
-│   ├── vaultkey.ico          # Windows icon (place here manually)
-│   ├── vaultkey.icns         # macOS icon (place here manually)
-│   ├── vaultkey.png          # Linux icon (place here manually)
-│   ├── entitlements.plist    # macOS hardened runtime entitlements
-│   └── README.md             # Icon generation instructions
-└── README.md             # This file
-```
+This folder contains everything needed to produce distributable binaries for all three platforms.
 
 ## Quick Start
 
-### Prerequisites
-
-```bash
-pip install pyinstaller
-```
-
-Optionally install UPX for binary compression (~30% smaller):
-- **Linux**: `sudo apt install upx` or `sudo dnf install upx`
-- **macOS**: `brew install upx`
-- **Windows**: Download from https://github.com/upx/upx/releases
-
-### Build Locally
-
-**Linux:**
-```bash
-chmod +x build/scripts/build-linux.sh
-./build/scripts/build-linux.sh
-```
-
-**macOS:**
-```bash
-chmod +x build/scripts/build-macos.sh
-./build/scripts/build-macos.sh
-# With code signing:
-export MACOS_SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)"
-./build/scripts/build-macos.sh
-```
-
-**Windows (PowerShell):**
+### Windows
 ```powershell
-.\build\scripts\build-windows.ps1
-# CLI only:
-.\build\scripts\build-windows.ps1 -CliOnly
+# CLI + GUI (recommended)
+.\build\scripts\build-windows.ps1 -Target all -Version 2.0.0
+
+# CLI only (faster, smaller)
+.\build\scripts\build-windows.ps1 -Target cli
 ```
+Output: `dist/windows/vaultkey.exe`, `dist/windows/vaultkey-gui.exe`
 
-### Using Nuitka (Optional)
-
-Nuitka compiles Python to C for smaller, faster binaries:
-
+### Linux
 ```bash
-pip install nuitka ordered-set zstandard
-# Linux: also install patchelf
-sudo apt install patchelf
+bash build/scripts/build-linux.sh all 2.0.0
+```
+Output:
+- `dist/linux/vaultkey` — CLI binary (raw ELF, ~15-25MB)
+- `dist/linux/vaultkey-tui` — TUI binary
+- `dist/linux/VaultKey-2.0.0-x86_64.AppImage` — portable GUI
 
-./build/nuitka/build-nuitka.sh all
+### macOS
+```bash
+bash build/scripts/build-macos.sh all 2.0.0
+```
+Output:
+- `dist/macos/vaultkey` — CLI binary
+- `dist/macos/VaultKey.app` — GUI .app bundle (unsigned by default)
+- `dist/macos/VaultKey-2.0.0.dmg` — DMG (requires `brew install create-dmg`)
+
+For signed builds, set env vars before running:
+```bash
+export CODESIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)"
+export APPLE_TEAM_ID="YOURTEAMID"
+bash build/scripts/build-macos.sh gui 2.0.0
 ```
 
-## Binary Sizes (Expected)
+## GitHub Actions (Automated)
 
-| Binary | Platform | Approx. Size |
-|--------|----------|--------------|
-| `vaultkey-cli` | All | 15–25 MB |
-| `vaultkey-tui` | All | 30–45 MB |
-| `vaultkey-gui.exe` / `VaultKey.app` | Windows/macOS | 40–65 MB |
-| `vaultkey-linux.AppImage` | Linux | 45–70 MB |
+The build pipeline is fully automated via:
+- **`.github/workflows/release.yml`** — triggered by pushing a version tag (`git tag v2.0.0 && git push --tags`)
+- **`.github/workflows/ci.yml`** — runs on every push/PR (lint + typecheck + tests + security scan)
 
-> Sizes with UPX compression are ~30% smaller.
+### Releasing v2.0.0
+```bash
+git tag -a v2.0.0 -m "VaultKey v2.0.0"
+git push origin v2.0.0
+```
+This triggers the matrix build (6 jobs in parallel) and creates a GitHub Release with all binaries attached.
 
-## GitHub Actions
+### Required GitHub Secrets
 
-Binaries are built automatically by the **Binaries** workflow:
+| Secret | Required | Description |
+|---|---|---|
+| `MACOS_CODESIGN_IDENTITY` | Optional | e.g. `Developer ID Application: Name (TEAMID)` |
+| `MACOS_CERTIFICATE` | Optional | Base64-encoded `.p12` certificate |
+| `MACOS_CERTIFICATE_PWD` | Optional | Password for the `.p12` cert |
+| `APPLE_TEAM_ID` | Optional | For notarization |
+| `GITHUB_TOKEN` | Auto | Provided by GitHub Actions automatically |
 
-- **Trigger**: On push to `v*` tags (e.g. `v2.0.0`) OR manually via workflow_dispatch
-- **Matrix**: `windows-latest × linux-latest × macos-latest` × `cli + gui`
-- **Artifacts**: Attached to the GitHub Release automatically
+Without the macOS secrets, builds are **unsigned** — still functional, users need to right-click → Open on first launch.
 
-See [`.github/workflows/binaries.yml`](../.github/workflows/binaries.yml)
+## Structure
 
-## macOS Code Signing
+```
+build/
+├── pyinstaller/
+│   ├── vaultkey-cli.spec       # CLI spec (console=True, minimal deps)
+│   ├── vaultkey-tui.spec       # TUI spec (Textual + all CSS assets bundled)
+│   ├── vaultkey-gui.spec       # GUI spec (CustomTkinter + .app bundle on macOS)
+│   └── hooks/
+│       ├── hook-argon2.py      # Ensures argon2-cffi CFFI binary is collected
+│       ├── hook-cryptography.py # Ensures Rust extension is collected
+│       └── hook-wallet.py      # Collects all wallet submodules
+├── nuitka/
+│   └── build-all.sh            # Alternative: compile to C (better perf, harder to RE)
+├── macos/
+│   └── entitlements.plist      # Hardened runtime entitlements for codesign
+├── scripts/
+│   ├── build-windows.ps1       # Windows PowerShell build
+│   ├── build-linux.sh          # Linux build + AppImage packaging
+│   └── build-macos.sh          # macOS build + codesign + DMG
+└── README.md                   # This file
+```
 
-To sign for distribution outside the App Store:
+## Troubleshooting
 
-1. Obtain a **Developer ID Application** certificate from Apple Developer Portal
-2. Export as `.p12` and base64-encode it:
-   ```bash
-   base64 -i certificate.p12 | pbcopy
-   ```
-3. Add these **GitHub repository secrets**:
-   - `MACOS_CERTIFICATE` — base64-encoded .p12
-   - `MACOS_CERTIFICATE_PWD` — .p12 password
-   - `MACOS_SIGN_IDENTITY` — e.g. `Developer ID Application: Your Name (TEAMID)`
-   - `MACOS_KEYCHAIN_PWD` — temporary keychain password (any random string)
+### `ModuleNotFoundError: cryptography` at runtime
+The `cryptography` package uses a Rust extension (`_rust.pyd`/`.so`). If it's not bundled:
+```bash
+pip show cryptography  # check version
+# Make sure hook-cryptography.py is in build/pyinstaller/hooks/
+```
 
-The `binaries.yml` workflow automatically imports the certificate and signs the build if these secrets are present.
+### `argon2` binary missing
+argon2-cffi uses CFFI. Ensure the hook is active and your venv path is correct in the spec file.
 
-## Known Issues
+### CustomTkinter theme not found at runtime (GUI)
+CTk loads theme JSON files dynamically. The `collect_data_files('customtkinter')` call in the spec handles this, but verify the `datas` tuple path matches your venv.
 
-### cryptography / OpenSSL
-`cryptography` uses a Rust extension that bundles OpenSSL. PyInstaller
-sometimes misses the `_rust` submodule — the `hook-cryptography.py` and
-`rthook_cryptography.py` files fix this.
+### macOS: `app is damaged and can't be opened`
+This happens with unsigned builds. Fix:
+```bash
+xattr -cr VaultKey.app
+```
+Or quarantine remove:
+```bash
+xattr -d com.apple.quarantine VaultKey.app
+```
 
-### Textual CSS Files
-Textual loads `.tcss` CSS files at runtime. The `collect_data_files("textual")`
-call in `vaultkey-tui.spec` ensures they are bundled. If TUI fails with
-`FileNotFoundError` on `.tcss`, verify this.
+### AppImage: `FUSE` error on Linux
+```bash
+sudo apt install libfuse2   # Ubuntu 22.04+
+```
 
-### CustomTkinter Themes
-CustomTkinter loads JSON theme files from its package directory. The
-`collect_data_files("customtkinter")` call handles this. If the GUI starts
-with wrong theming or crashes, check that `customtkinter/` data was collected.
-
-### Windows Antivirus
-PyInstaller `.exe` files frequently trigger false positives on Windows Defender.
-This is a known issue with all PyInstaller builds. Adding the binary to the
-Windows Defender exclusions list resolves it. Signing with an EV code-signing
-certificate eliminates this entirely.
+### Binary too large (>100MB)
+- UPX compression is enabled by default (`upx=True` in spec)
+- `optimize=2` strips docstrings
+- Check `excludes` list in spec — add more unused packages
+- Consider Nuitka build for GUI (better DCE)

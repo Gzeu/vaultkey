@@ -1,147 +1,108 @@
 #!/usr/bin/env bash
 # VaultKey — Linux build script
-# Produces: dist/vaultkey-cli, dist/vaultkey-tui, dist/vaultkey-linux.AppImage
-# Requirements: Python 3.11+, appimagetool in PATH (or auto-downloaded)
-#
-# Usage:
-#   ./build/scripts/build-linux.sh             # builds all targets
-#   ./build/scripts/build-linux.sh --cli-only  # CLI only
-#   ./build/scripts/build-linux.sh --gui-only  # GUI only
+# Usage: bash build/scripts/build-linux.sh [cli|tui|gui|all] [version]
+# Produces:
+#   dist/linux/vaultkey         (CLI, raw ELF)
+#   dist/linux/vaultkey-tui     (TUI, raw ELF)
+#   dist/linux/VaultKey-*.AppImage  (GUI, portable AppImage)
+# Requires: python3.11+, pyinstaller, appimagetool (auto-downloaded if missing)
 
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-DIST="${ROOT}/dist"
-BUILD_TMP="${ROOT}/build_tmp"
+TARGET="${1:-all}"
+VERSION="${2:-2.0.0}"
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+DIST="$ROOT/dist/linux"
 
-CLI_ONLY=false
-GUI_ONLY=false
-for arg in "$@"; do
-  [[ "$arg" == "--cli-only" ]] && CLI_ONLY=true
-  [[ "$arg" == "--gui-only" ]] && GUI_ONLY=true
-done
+echo "==> VaultKey Linux Build v$VERSION"
+echo "    Target : $TARGET"
+echo "    Root   : $ROOT"
+mkdir -p "$DIST"
 
-echo "====================================================="
-echo " VaultKey Linux Build Script"
-echo "====================================================="
-echo " Root : ${ROOT}"
-echo " Dist : ${DIST}"
-echo ""
+# Check PyInstaller
+python3 -m PyInstaller --version &>/dev/null || pip3 install pyinstaller
 
-# ── Setup virtualenv ──────────────────────────────────────────────────────────
-if [[ ! -d "${ROOT}/.venv-build" ]]; then
-  echo "[*] Creating isolated build virtualenv..."
-  python3 -m venv "${ROOT}/.venv-build"
-fi
+build_target() {
+    local name="$1"
+    echo "==> Building $name..."
+    python3 -m PyInstaller \
+        --distpath "$DIST" \
+        --workpath "$ROOT/build/tmp/$name" \
+        --noconfirm \
+        --clean \
+        "$ROOT/build/pyinstaller/vaultkey-$name.spec"
+    echo "    OK -> dist/linux/$name"
+}
 
-source "${ROOT}/.venv-build/bin/activate"
+build_appimage() {
+    echo "==> Packaging GUI as AppImage..."
+    local APPDIR="$ROOT/build/tmp/AppDir"
+    local BINARY="$DIST/vaultkey-gui"
 
-echo "[*] Installing build dependencies..."
-pip install --quiet --upgrade pip
-pip install --quiet -e "${ROOT}[dev]"
-pip install --quiet pyinstaller upx-ucl || pip install --quiet pyinstaller
+    [ -f "$BINARY" ] || { echo "ERROR: $BINARY not found. Build gui first."; exit 1; }
 
-mkdir -p "${DIST}" "${BUILD_TMP}"
+    # Download appimagetool if not on PATH
+    if ! command -v appimagetool &>/dev/null; then
+        echo "    Downloading appimagetool..."
+        curl -fsSL -o /tmp/appimagetool \
+            "https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage"
+        chmod +x /tmp/appimagetool
+        APPIMAGETOOL=/tmp/appimagetool
+    else
+        APPIMAGETOOL=appimagetool
+    fi
 
-# ── Build CLI ─────────────────────────────────────────────────────────────────
-if [[ "$GUI_ONLY" == false ]]; then
-  echo ""
-  echo "[1/3] Building CLI binary..."
-  pyinstaller \
-    --distpath "${DIST}" \
-    --workpath "${BUILD_TMP}/cli" \
-    --noconfirm \
-    "${ROOT}/build/pyinstaller/vaultkey-cli.spec"
+    # Build AppDir structure
+    rm -rf "$APPDIR"
+    mkdir -p "$APPDIR/usr/bin" "$APPDIR/usr/share/icons/hicolor/256x256/apps"
 
-  echo "[*] Built: ${DIST}/vaultkey-cli"
+    cp "$BINARY" "$APPDIR/usr/bin/vaultkey-gui"
+    chmod +x "$APPDIR/usr/bin/vaultkey-gui"
 
-  echo ""
-  echo "[2/3] Building TUI binary..."
-  pyinstaller \
-    --distpath "${DIST}" \
-    --workpath "${BUILD_TMP}/tui" \
-    --noconfirm \
-    "${ROOT}/build/pyinstaller/vaultkey-tui.spec"
+    # AppRun entrypoint
+    cat > "$APPDIR/AppRun" << 'EOF'
+#!/bin/bash
+cd "$(dirname "$0")"
+exec "$APPDIR/usr/bin/vaultkey-gui" "$@"
+EOF
+    chmod +x "$APPDIR/AppRun"
 
-  echo "[*] Built: ${DIST}/vaultkey-tui"
-fi
-
-# ── Build GUI ─────────────────────────────────────────────────────────────────
-if [[ "$CLI_ONLY" == false ]]; then
-  echo ""
-  echo "[3/3] Building GUI binary..."
-  pyinstaller \
-    --distpath "${DIST}" \
-    --workpath "${BUILD_TMP}/gui" \
-    --noconfirm \
-    "${ROOT}/build/pyinstaller/vaultkey-gui.spec"
-
-  echo "[*] Built: ${DIST}/vaultkey-gui"
-fi
-
-# ── AppImage packaging (GUI) ─────────────────────────────────────────────────
-if [[ "$CLI_ONLY" == false ]]; then
-  echo ""
-  echo "[AppImage] Packaging GUI as AppImage..."
-
-  # Download appimagetool if not in PATH
-  APPIMAGETOOL="$(command -v appimagetool 2>/dev/null || true)"
-  if [[ -z "$APPIMAGETOOL" ]]; then
-    echo "[*] appimagetool not found — downloading..."
-    APPIMAGETOOL="/tmp/appimagetool"
-    curl -fsSL -o "$APPIMAGETOOL" \
-      "https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage"
-    chmod +x "$APPIMAGETOOL"
-  fi
-
-  APPDIR="${BUILD_TMP}/VaultKey.AppDir"
-  rm -rf "$APPDIR"
-  mkdir -p "${APPDIR}/usr/bin" "${APPDIR}/usr/share/icons/hicolor/512x512/apps"
-
-  # Copy binary
-  cp "${DIST}/vaultkey-gui" "${APPDIR}/usr/bin/vaultkey"
-  chmod +x "${APPDIR}/usr/bin/vaultkey"
-
-  # Desktop entry
-  cat > "${APPDIR}/vaultkey.desktop" << 'DESKTOP'
+    # .desktop file
+    cat > "$APPDIR/vaultkey.desktop" << EOF
 [Desktop Entry]
 Name=VaultKey
-Exec=vaultkey
+Exec=vaultkey-gui
 Icon=vaultkey
 Type=Application
 Categories=Utility;Security;
-Comment=Ultra-secure API key manager
-DESKTOP
+Comment=Ultra-secure API key wallet
+EOF
 
-  # Icon
-  if [[ -f "${ROOT}/build/assets/vaultkey.png" ]]; then
-    cp "${ROOT}/build/assets/vaultkey.png" \
-       "${APPDIR}/usr/share/icons/hicolor/512x512/apps/vaultkey.png"
-    cp "${ROOT}/build/assets/vaultkey.png" "${APPDIR}/vaultkey.png"
-  fi
+    # Use placeholder icon if none exists
+    if [ -f "$ROOT/docs/assets/icon.png" ]; then
+        cp "$ROOT/docs/assets/icon.png" "$APPDIR/usr/share/icons/hicolor/256x256/apps/vaultkey.png"
+        cp "$ROOT/docs/assets/icon.png" "$APPDIR/vaultkey.png"
+    else
+        # Create minimal SVG icon as fallback
+        cat > "$APPDIR/vaultkey.svg" << 'EOF'
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <rect width="64" height="64" rx="12" fill="#01696f"/>
+  <path d="M32 14a12 12 0 0 0-12 12v4h-4v20h32V30h-4v-4a12 12 0 0 0-12-12zm0 4a8 8 0 0 1 8 8v4H24v-4a8 8 0 0 1 8-8zm0 14a4 4 0 1 1 0 8 4 4 0 0 1 0-8z" fill="white"/>
+</svg>
+EOF
+    fi
 
-  # AppRun symlink
-  cat > "${APPDIR}/AppRun" << 'APPRUN'
-#!/bin/bash
-exec "$(dirname "$0")/usr/bin/vaultkey" "$@"
-APPRUN
-  chmod +x "${APPDIR}/AppRun"
+    ARCH=x86_64 "$APPIMAGETOOL" "$APPDIR" "$DIST/VaultKey-$VERSION-x86_64.AppImage"
+    echo "    OK -> dist/linux/VaultKey-$VERSION-x86_64.AppImage"
+}
 
-  # Build
-  ARCH=x86_64 "$APPIMAGETOOL" "$APPDIR" "${DIST}/vaultkey-linux.AppImage" 2>&1
-  chmod +x "${DIST}/vaultkey-linux.AppImage"
-  echo "[*] Built: ${DIST}/vaultkey-linux.AppImage"
+if [[ "$TARGET" == 'all' || "$TARGET" == 'cli' ]]; then build_target 'cli'; fi
+if [[ "$TARGET" == 'all' || "$TARGET" == 'tui' ]]; then build_target 'tui'; fi
+if [[ "$TARGET" == 'all' || "$TARGET" == 'gui' ]]; then
+    build_target 'gui'
+    build_appimage
 fi
 
-# ── SHA256 checksums ─────────────────────────────────────────────────────────
 echo ""
-echo "[*] Generating SHA256 checksums..."
-cd "${DIST}"
-sha256sum vaultkey-cli vaultkey-tui vaultkey-gui vaultkey-linux.AppImage \
-  2>/dev/null | tee SHA256SUMS-linux.txt || true
-
-echo ""
-echo "====================================================="
-echo " Linux build complete!"
-echo "====================================================="
-ls -lh "${DIST}"
+echo "==> Done. Binaries in: dist/linux/"
+ls -lh "$DIST" 2>/dev/null || true
