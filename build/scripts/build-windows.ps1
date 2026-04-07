@@ -1,52 +1,138 @@
-# VaultKey — Windows build script
-# Usage: .\build\scripts\build-windows.ps1 [-Target cli|tui|gui|all] [-Version 2.0.0]
-# Requires: Python 3.11+, pip install pyinstaller upx (upx optional but recommended)
+# VaultKey — Windows Build Script (PowerShell 7+)
+# Produces: dist/vaultkey.exe (CLI), dist/VaultKey.exe (GUI)
+# Requirements: Python 3.11+, pip install pyinstaller
+#
+# Usage:
+#   .\build\scripts\build-windows.ps1
+#   .\build\scripts\build-windows.ps1 -Target cli
+#   .\build\scripts\build-windows.ps1 -Target gui
+#   .\build\scripts\build-windows.ps1 -Target all
 
 param(
-    [ValidateSet('cli','tui','gui','all')]
+    [ValidateSet('cli', 'tui', 'gui', 'all')]
     [string]$Target = 'all',
-    [string]$Version = '2.0.0'
+    [switch]$Clean,
+    [switch]$NoUPX
 )
 
 $ErrorActionPreference = 'Stop'
-$Root = Split-Path (Split-Path $PSScriptRoot)
-$Dist = Join-Path $Root 'dist'
+$ROOT = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 
-Write-Host "==> VaultKey Windows Build v$Version" -ForegroundColor Cyan
-Write-Host "    Target  : $Target"
-Write-Host "    Root    : $Root"
+Write-Host "" 
+Write-Host "  VaultKey Windows Build Pipeline" -ForegroundColor Cyan
+Write-Host "  Target: $Target" -ForegroundColor Gray
 Write-Host ""
 
-# Ensure PyInstaller is installed
-pip show pyinstaller | Out-Null
-if ($LASTEXITCODE -ne 0) {
+# Validate environment
+if (-not (Get-Command python -ErrorAction SilentlyContinue)) {
+    Write-Error "Python not found in PATH. Install Python 3.11+ first."
+    exit 1
+}
+
+$PythonVersion = python -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"
+if ([version]$PythonVersion -lt [version]"3.11") {
+    Write-Error "Python 3.11+ required. Found: $PythonVersion"
+    exit 1
+}
+
+if (-not (python -c "import PyInstaller" 2>$null; $?)) {
     Write-Host "Installing PyInstaller..." -ForegroundColor Yellow
-    pip install pyinstaller
+    pip install "pyinstaller>=6.0" --quiet
 }
 
-function Build-Target($name) {
-    Write-Host "==> Building $name..." -ForegroundColor Green
-    $spec = Join-Path $Root "build\pyinstaller\vaultkey-$name.spec"
-    pyinstaller `
-        --distpath "$Dist\windows" `
-        --workpath "$Root\build\tmp\$name" `
-        --noconfirm `
-        --clean `
-        $spec
+if (-not (python -c "import upx" 2>$null; $?) -and -not $NoUPX) {
+    Write-Host "UPX not found — binaries will not be compressed. Install UPX for smaller files." -ForegroundColor Yellow
+}
+
+# Clean previous builds
+if ($Clean -or (Test-Path "$ROOT\dist")) {
+    Write-Host "Cleaning previous dist/..." -ForegroundColor Yellow
+    Remove-Item -Recurse -Force "$ROOT\dist" -ErrorAction SilentlyContinue
+    Remove-Item -Recurse -Force "$ROOT\build\__pycache__" -ErrorAction SilentlyContinue
+}
+
+Set-Location $ROOT
+
+function Build-Target {
+    param([string]$Name, [string]$SpecFile)
+    
+    Write-Host "Building $Name..." -ForegroundColor Green
+    $startTime = Get-Date
+    
+    $args = @(
+        "--clean",
+        "--noconfirm",
+        $SpecFile
+    )
+    if ($NoUPX) { $args += "--noupx" }
+    
+    python -m PyInstaller @args
+    
     if ($LASTEXITCODE -ne 0) {
-        Write-Error "Build failed for $name"
-        exit 1
+        Write-Error "Build failed for $Name (exit code: $LASTEXITCODE)"
+        exit $LASTEXITCODE
     }
-    Write-Host "    OK -> dist\windows\$name" -ForegroundColor Green
+    
+    $elapsed = (Get-Date) - $startTime
+    Write-Host "  $Name built in $($elapsed.TotalSeconds.ToString('F1'))s" -ForegroundColor Gray
 }
 
-if ($Target -eq 'all' -or $Target -eq 'cli') { Build-Target 'cli' }
-if ($Target -eq 'all' -or $Target -eq 'tui') { Build-Target 'tui' }
-if ($Target -eq 'all' -or $Target -eq 'gui') { Build-Target 'gui' }
+# Generate Windows version info file
+$VersionContent = @"
+VSVERS1 {
+  FILEVERSION 2,0,0,0
+  PRODUCTVERSION 2,0,0,0
+  FILEFLAGSMASK 0x3fL
+  FILEFLAGS 0x0L
+  FILEOS 0x40004L
+  FILETYPE 0x1L
+  FILESUBTYPE 0x0L
+  BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+      BLOCK "040904B0"
+      BEGIN
+        VALUE "CompanyName", "VaultKey Contributors"
+        VALUE "FileDescription", "VaultKey — Secure API Key Manager"
+        VALUE "FileVersion", "2.0.0.0"
+        VALUE "InternalName", "vaultkey"
+        VALUE "LegalCopyright", "MIT License"
+        VALUE "OriginalFilename", "vaultkey.exe"
+        VALUE "ProductName", "VaultKey"
+        VALUE "ProductVersion", "2.0.0.0"
+      END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+      VALUE "Translation", 0x409, 1200
+    END
+  END
+}
+"@
+$VersionContent | Out-File -FilePath "$ROOT\build\assets\version.txt" -Encoding UTF8
+
+switch ($Target) {
+    'cli' { Build-Target 'CLI' "$ROOT\build\pyinstaller\vaultkey-cli.spec" }
+    'tui' { Build-Target 'TUI' "$ROOT\build\pyinstaller\vaultkey-tui.spec" }
+    'gui' { Build-Target 'GUI' "$ROOT\build\pyinstaller\vaultkey-gui.spec" }
+    'all' {
+        Build-Target 'CLI' "$ROOT\build\pyinstaller\vaultkey-cli.spec"
+        Build-Target 'TUI' "$ROOT\build\pyinstaller\vaultkey-tui.spec"
+        Build-Target 'GUI' "$ROOT\build\pyinstaller\vaultkey-gui.spec"
+    }
+}
+
+# Rename for clarity + compute hashes
+Write-Host ""
+Write-Host "Artifacts:" -ForegroundColor Cyan
+Get-ChildItem "$ROOT\dist" -Filter "*.exe" | ForEach-Object {
+    $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower()
+    $sizeKB = [math]::Round($_.Length / 1KB, 0)
+    Write-Host "  $($_.Name)  (${sizeKB}KB)" -ForegroundColor White
+    Write-Host "  SHA256: $hash" -ForegroundColor Gray
+    # Write sidecar
+    "$hash  $($_.Name)" | Out-File -FilePath "$ROOT\dist\$($_.BaseName).sha256" -Encoding ASCII
+}
 
 Write-Host ""
-Write-Host "==> Build complete. Binaries in: dist\windows\" -ForegroundColor Cyan
-Get-ChildItem "$Dist\windows" -Recurse -Filter '*.exe' | ForEach-Object {
-    $size = [math]::Round($_.Length / 1MB, 1)
-    Write-Host "    $($_.Name)  ($size MB)"
-}
+Write-Host "  Windows build complete." -ForegroundColor Green

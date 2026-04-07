@@ -1,17 +1,23 @@
-# PyInstaller hook for cryptography (pyca/cryptography)
-# The Rust-backed _rust extension must be explicitly collected.
+# PyInstaller hook for cryptography
+# The cryptography package ships a Rust extension (_rust) that PyInstaller
+# misses without explicit collection.
+from PyInstaller.utils.hooks import collect_all, collect_dynamic_libs
 
-from PyInstaller.utils.hooks import collect_dynamic_libs, collect_data_files, collect_submodules
-
-datas = collect_data_files('cryptography')
-binaries = collect_dynamic_libs('cryptography')
-hiddenimports = collect_submodules('cryptography.hazmat') + [
+datas, binaries, hiddenimports = collect_all('cryptography')
+binaries += collect_dynamic_libs('cryptography')
+hiddenimports += [
+    'cryptography.hazmat.backends.openssl',
+    'cryptography.hazmat.backends.openssl.aead',
     'cryptography.hazmat.bindings._rust',
+    'cryptography.hazmat.bindings._rust.openssl',
+    'cryptography.hazmat.primitives.ciphers',
     'cryptography.hazmat.primitives.ciphers.aead',
     'cryptography.hazmat.primitives.kdf.hkdf',
-    'cryptography.hazmat.primitives.kdf.pbkdf2',
+    'cryptography.hazmat.primitives.kdf.scrypt',
     'cryptography.hazmat.primitives.hmac',
     'cryptography.hazmat.primitives.hashes',
-    'cryptography.hazmat.backends.openssl',
-    'cryptography.hazmat.backends.openssl.backend',
+    'cryptography.hazmat.primitives.padding',
+    'cryptography.hazmat.primitives.serialization',
+    'cryptography.hazmat.primitives.asymmetric',
+    'cryptography.x509',
 ]

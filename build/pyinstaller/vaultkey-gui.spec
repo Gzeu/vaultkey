@@ -1,63 +1,68 @@
 # -*- mode: python ; coding: utf-8 -*-
 # VaultKey GUI — PyInstaller spec
-# Produces: vaultkey-gui (single-file, CustomTkinter windowed app)
+# Produces a windowed single-file executable using CustomTkinter.
 
 import sys
 from pathlib import Path
 
 ROOT = Path(SPECPATH).parent.parent
 
-from PyInstaller.utils.hooks import collect_data_files, collect_submodules
+# Locate customtkinter data directory (ships themes + fonts)
+try:
+    import customtkinter
+    CTK_PATH = Path(customtkinter.__file__).parent
+except ImportError:
+    CTK_PATH = None
 
-ctk_datas = collect_data_files('customtkinter')
+datas = [(str(ROOT / 'wallet'), 'wallet')]
+if CTK_PATH:
+    datas.append((str(CTK_PATH), 'customtkinter'))
 
 a = Analysis(
     [str(ROOT / 'wallet' / 'ui' / 'gui.py')],
     pathex=[str(ROOT)],
     binaries=[],
-    datas=[
-        *ctk_datas,
-        # CustomTkinter needs its themes folder at runtime
-        (str(ROOT / '.venv' / 'Lib' / 'site-packages' / 'customtkinter') if sys.platform == 'win32'
-         else str(ROOT / '.venv' / 'lib'), 'customtkinter'),
-    ],
+    datas=datas,
     hiddenimports=[
+        'argon2._utils',
+        'argon2.low_level',
+        'cryptography.hazmat.backends.openssl',
+        'cryptography.hazmat.bindings._rust',
+        'cryptography.hazmat.primitives.ciphers.aead',
+        'cryptography.hazmat.primitives.kdf.hkdf',
+        'pydantic.deprecated.class_validators',
+        'pydantic.deprecated.config',
+        # CustomTkinter internals
         'customtkinter',
-        'tkinter',
-        'tkinter.ttk',
+        'customtkinter.windows',
+        'customtkinter.windows.widgets',
+        'customtkinter.windows.widgets.theme',
         'PIL',
         'PIL.Image',
         'PIL.ImageTk',
-        'PIL._tkinter_finder',
-        'argon2._utils',
-        'argon2._ffi',
-        'cryptography.hazmat.primitives.ciphers.aead',
-        'cryptography.hazmat.primitives.kdf.hkdf',
-        'cryptography.hazmat.bindings._rust',
-        'rich.logging',
-        'pydantic',
-        'pydantic_settings',
+        'PIL.ImageDraw',
+        'PIL._imaging',
+        # tkinter
+        'tkinter',
+        'tkinter.ttk',
+        'tkinter.font',
+        'tkinter.messagebox',
+        'tkinter.filedialog',
+        '_tkinter',
+        # pystray (system tray — optional, graceful fallback)
+        'pystray',
+        # rest
         'pyperclip',
         'httpx',
-        'wallet.core.crypto',
-        'wallet.core.kdf',
-        'wallet.core.session',
-        'wallet.core.storage',
-        'wallet.core.integrity',
-        'wallet.core.health',
-        'wallet.core.rotate',
-        'wallet.core.wipe',
-        'wallet.models',
-        'wallet.utils',
+        'anyio',
+        'sniffio',
+        'rich.console',
     ],
-    hookspath=['build/pyinstaller/hooks'],
+    hookspath=[str(ROOT / 'build' / 'pyinstaller' / 'hooks')],
     hooksconfig={},
     runtime_hooks=[],
     excludes=[
         'textual',
-        'matplotlib',
-        'numpy',
-        'scipy',
     ],
     noarchive=False,
     optimize=2,
@@ -65,46 +70,71 @@ a = Analysis(
 
 pyz = PYZ(a.pure)
 
-exe = EXE(
-    pyz,
-    a.scripts,
-    a.binaries,
-    a.datas,
-    [],
-    name='vaultkey-gui',
-    debug=False,
-    bootloader_ignore_signals=False,
-    strip=True,
-    upx=True,
-    upx_exclude=[],
-    runtime_tmpdir=None,
-    console=False,         # windowed — no console popup on Windows/macOS
-    disable_windowed_traceback=False,
-    argv_emulation=False,  # macOS argv emulation off (avoid LSOpenApplication issues)
-    target_arch=None,
-    codesign_identity=None,
-    entitlements_file='build/macos/entitlements.plist' if sys.platform == 'darwin' else None,
-    icon=str(ROOT / 'docs' / 'assets' / 'icon.ico') if sys.platform == 'win32' and (ROOT / 'docs' / 'assets' / 'icon.ico').exists()
-         else (str(ROOT / 'docs' / 'assets' / 'icon.icns') if sys.platform == 'darwin' and (ROOT / 'docs' / 'assets' / 'icon.icns').exists()
-               else None),
-)
-
-# macOS .app bundle
 if sys.platform == 'darwin':
-    app = BUNDLE(
+    # macOS: produce a .app bundle
+    exe = EXE(
+        pyz,
+        a.scripts,
+        [],
+        exclude_binaries=True,
+        name='VaultKey',
+        debug=False,
+        bootloader_ignore_signals=False,
+        strip=True,
+        upx=False,
+        console=False,
+        disable_windowed_traceback=False,
+        argv_emulation=True,  # needed for macOS .app drag-and-drop
+        target_arch=None,
+        codesign_identity=None,
+        entitlements_file=str(ROOT / 'build' / 'assets' / 'entitlements.plist'),
+        icon=str(ROOT / 'build' / 'assets' / 'icon.icns'),
+    )
+    coll = COLLECT(
         exe,
+        a.binaries,
+        a.datas,
+        strip=True,
+        upx=False,
+        upx_exclude=[],
+        name='VaultKey',
+    )
+    app = BUNDLE(
+        coll,
         name='VaultKey.app',
-        icon=str(ROOT / 'docs' / 'assets' / 'icon.icns') if (ROOT / 'docs' / 'assets' / 'icon.icns').exists() else None,
+        icon=str(ROOT / 'build' / 'assets' / 'icon.icns'),
         bundle_identifier='io.vaultkey.app',
         info_plist={
-            'CFBundleName': 'VaultKey',
-            'CFBundleDisplayName': 'VaultKey',
-            'CFBundleVersion': '2.0.0',
             'CFBundleShortVersionString': '2.0.0',
+            'CFBundleVersion': '2.0.0',
             'NSHighResolutionCapable': True,
-            'NSRequiresAquaSystemAppearance': False,  # allows dark mode
             'LSMinimumSystemVersion': '12.0',
-            'LSUIElement': False,
-            'NSAppleEventsUsageDescription': 'VaultKey needs automation access to fill credentials.',
+            'NSHumanReadableCopyright': 'MIT License',
+            'NSPrincipalClass': 'NSApplication',
+            'NSAppleScriptEnabled': False,
         },
+    )
+else:
+    # Windows / Linux: single-file exe
+    exe = EXE(
+        pyz,
+        a.scripts,
+        a.binaries,
+        a.datas,
+        [],
+        name='VaultKey',
+        debug=False,
+        bootloader_ignore_signals=False,
+        strip=True,
+        upx=True,
+        upx_exclude=['vcruntime140.dll', 'python*.dll', '_tkinter*.dll'],
+        runtime_tmpdir=None,
+        console=False,
+        disable_windowed_traceback=False,
+        argv_emulation=False,
+        target_arch=None,
+        codesign_identity=None,
+        entitlements_file=None,
+        icon=str(ROOT / 'build' / 'assets' / 'icon.ico') if sys.platform == 'win32' else None,
+        version=str(ROOT / 'build' / 'assets' / 'version.txt') if sys.platform == 'win32' else None,
     )

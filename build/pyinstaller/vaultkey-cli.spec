@@ -1,6 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
 # VaultKey CLI — PyInstaller spec
-# Produces: vaultkey-cli (single-file, no console window on Windows)
+# Produces a single-file executable for the CLI interface.
 
 import sys
 from pathlib import Path
@@ -12,52 +12,49 @@ a = Analysis(
     pathex=[str(ROOT)],
     binaries=[],
     datas=[
-        # argon2-cffi needs its _ffi_bindings
-        (str(ROOT / '.venv' / 'Lib' / 'site-packages' / 'argon2') if sys.platform == 'win32'
-         else str(ROOT / '.venv' / 'lib'), 'argon2'),
+        (str(ROOT / 'wallet'), 'wallet'),
     ],
     hiddenimports=[
+        # argon2-cffi native bindings
         'argon2._utils',
-        'argon2._ffi',
-        'cryptography.hazmat.primitives.ciphers.aead',
-        'cryptography.hazmat.primitives.kdf.hkdf',
-        'cryptography.hazmat.primitives.hmac',
+        'argon2.low_level',
+        # cryptography hazmat backends
         'cryptography.hazmat.backends.openssl',
         'cryptography.hazmat.bindings._rust',
-        'rich.logging',
-        'rich.traceback',
+        'cryptography.hazmat.primitives.ciphers.aead',
+        'cryptography.hazmat.primitives.kdf.hkdf',
+        'cryptography.hazmat.primitives.kdf.scrypt',
+        # pydantic
+        'pydantic.deprecated.class_validators',
+        'pydantic.deprecated.config',
+        'pydantic.deprecated.tools',
+        # typer / click internals
         'typer',
         'click',
+        'rich.console',
+        'rich.traceback',
+        'rich.table',
+        'rich.panel',
+        'rich.progress',
+        'rich.prompt',
+        # pyperclip backends
         'pyperclip',
-        'pydantic',
-        'pydantic_settings',
+        # httpx
         'httpx',
-        'wallet.core.crypto',
-        'wallet.core.kdf',
-        'wallet.core.session',
-        'wallet.core.storage',
-        'wallet.core.integrity',
-        'wallet.core.health',
-        'wallet.core.rotate',
-        'wallet.core.wipe',
-        'wallet.models',
-        'wallet.utils',
+        'anyio',
+        'sniffio',
     ],
-    hookspath=['build/pyinstaller/hooks'],
+    hookspath=[str(ROOT / 'build' / 'pyinstaller' / 'hooks')],
     hooksconfig={},
     runtime_hooks=[],
     excludes=[
-        'textual',
+        # Exclude GUI/TUI deps from CLI binary
         'customtkinter',
+        'textual',
         'tkinter',
         '_tkinter',
         'PIL',
-        'matplotlib',
-        'numpy',
-        'scipy',
-        'IPython',
-        'jupyter',
-        'notebook',
+        'Pillow',
     ],
     noarchive=False,
     optimize=2,
@@ -76,13 +73,14 @@ exe = EXE(
     bootloader_ignore_signals=False,
     strip=True,
     upx=True,
-    upx_exclude=[],
+    upx_exclude=['vcruntime140.dll', 'python*.dll'],
     runtime_tmpdir=None,
-    console=True,          # CLI needs console
+    console=True,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=str(ROOT / 'docs' / 'assets' / 'icon.ico') if (ROOT / 'docs' / 'assets' / 'icon.ico').exists() else None,
+    icon=str(ROOT / 'build' / 'assets' / 'icon.ico') if sys.platform == 'win32' else None,
+    version=str(ROOT / 'build' / 'assets' / 'version.txt') if sys.platform == 'win32' else None,
 )

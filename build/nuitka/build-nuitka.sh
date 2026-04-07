@@ -1,117 +1,78 @@
 #!/usr/bin/env bash
-# VaultKey — Nuitka build script
-# Nuitka compiles Python to C, producing smaller and faster binaries than PyInstaller.
-# Best used on Linux/macOS. Windows support is good but requires MSVC or MinGW.
+# VaultKey — Nuitka Build (Alternative / Performance Builds)
+# Nuitka compiles Python to C and then to native code.
+# Use this for maximum performance or when PyInstaller fails.
+#
+# Nuitka advantages over PyInstaller:
+#   - Smaller binaries (C compilation, no PYZ overhead)
+#   - Better AV (antivirus) compatibility on Windows
+#   - Harder to reverse-engineer (no embedded bytecode)
 #
 # Requirements:
 #   pip install nuitka ordered-set zstandard
-#   Linux:  gcc, patchelf
-#   macOS:  clang (Xcode CLI tools)
-#   Windows: MSVC (Visual Studio Build Tools)
+#   C compiler: gcc/clang on Linux/macOS, MSVC or MinGW on Windows
 #
 # Usage:
-#   ./build/nuitka/build-nuitka.sh [cli|tui|gui|all]
+#   ./build/nuitka/build-nuitka.sh cli
+#   ./build/nuitka/build-nuitka.sh gui
 
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-DIST="${ROOT}/dist-nuitka"
-TARGET="${1:-all}"
+TARGET="${1:-cli}"
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 
-echo "====================================================="
-echo " VaultKey Nuitka Build — Target: ${TARGET}"
-echo "====================================================="
+RED='\033[0;31m'; GREEN='\033[0;32m'; CYAN='\033[0;36m'; NC='\033[0m'
 
-if [[ ! -d "${ROOT}/.venv-build" ]]; then
-  python3 -m venv "${ROOT}/.venv-build"
+echo -e "\n  ${CYAN}VaultKey Nuitka Build — $TARGET${NC}\n"
+
+if ! python3 -c "import nuitka" 2>/dev/null; then
+    echo "Installing Nuitka..."
+    pip3 install nuitka ordered-set zstandard --quiet
 fi
-source "${ROOT}/.venv-build/bin/activate"
 
-pip install --quiet nuitka ordered-set zstandard
-mkdir -p "$DIST"
-
-# ── Common Nuitka flags ───────────────────────────────────────────────────────
-COMMON_FLAGS=(
-  --standalone
-  --onefile
-  --assume-yes-for-downloads
-  --python-flag=no_site
-  --python-flag=no_warnings
-  --python-flag=isolated
-  # Include wallet package
-  --include-package=wallet
-  --include-package=wallet.core
-  --include-package=wallet.models
-  --include-package=wallet.utils
-  --include-package=wallet.ui
-  # Cryptography
-  --include-package=cryptography
-  --include-distribution-metadata=cryptography
-  # argon2-cffi
-  --include-package=argon2
-  --include-distribution-metadata=argon2_cffi
-  # pydantic
-  --include-package=pydantic
-  --include-package=pydantic_core
-  --include-distribution-metadata=pydantic
-  # misc
-  --include-package=httpx
-  --include-package=pyperclip
-  --include-package=rich
-  --include-package=typer
-  # Output
-  --output-dir="${DIST}"
-  --remove-output
+NUITKA_COMMON=(
+    --onefile
+    --assume-yes-for-downloads
+    --follow-imports
+    --include-package=wallet
+    --include-package=cryptography
+    --include-package=argon2
+    --include-package=pydantic
+    --include-package=pydantic_settings
+    --include-package=httpx
+    --include-package=anyio
+    --python-flag=no_site
+    --python-flag=no_asserts
+    --output-dir="$ROOT/dist-nuitka"
 )
 
-# ── CLI ───────────────────────────────────────────────────────────────────────
-build_cli() {
-  echo "[*] Building CLI with Nuitka..."
-  python -m nuitka \
-    "${COMMON_FLAGS[@]}" \
-    --output-filename=vaultkey-cli \
-    --console-mode=force \
-    "${ROOT}/wallet/ui/cli.py"
-  echo "[*] Done: ${DIST}/vaultkey-cli"
-}
-
-# ── TUI ───────────────────────────────────────────────────────────────────────
-build_tui() {
-  echo "[*] Building TUI with Nuitka..."
-  python -m nuitka \
-    "${COMMON_FLAGS[@]}" \
-    --include-package=textual \
-    --include-data-dir="$(python -c 'import textual; import os; print(os.path.dirname(textual.__file__))')"=textual \
-    --output-filename=vaultkey-tui \
-    --console-mode=force \
-    "${ROOT}/wallet/ui/tui.py"
-  echo "[*] Done: ${DIST}/vaultkey-tui"
-}
-
-# ── GUI ───────────────────────────────────────────────────────────────────────
-build_gui() {
-  echo "[*] Building GUI with Nuitka..."
-  python -m nuitka \
-    "${COMMON_FLAGS[@]}" \
-    --include-package=customtkinter \
-    --include-package=tkinter \
-    --include-data-dir="$(python -c 'import customtkinter; import os; print(os.path.dirname(customtkinter.__file__))')"=customtkinter \
-    --output-filename=vaultkey-gui \
-    --console-mode=disable \
-    "${ROOT}/wallet/ui/gui.py"
-  echo "[*] Done: ${DIST}/vaultkey-gui"
-}
-
 case "$TARGET" in
-  cli) build_cli ;;
-  tui) build_tui ;;
-  gui) build_gui ;;
-  all) build_cli; build_tui; build_gui ;;
-  *) echo "Usage: $0 [cli|tui|gui|all]"; exit 1 ;;
+    cli)
+        python3 -m nuitka \
+            "${NUITKA_COMMON[@]}" \
+            --include-package=typer \
+            --include-package=rich \
+            --include-package=click \
+            --include-package=pyperclip \
+            --output-filename=vaultkey \
+            "$ROOT/wallet/ui/cli.py"
+        ;;
+    gui)
+        python3 -m nuitka \
+            "${NUITKA_COMMON[@]}" \
+            --include-package=customtkinter \
+            --include-data-dir="$(python3 -c 'import customtkinter,pathlib; print(pathlib.Path(customtkinter.__file__).parent)')"=customtkinter \
+            --include-package=PIL \
+            --include-package=tkinter \
+            --enable-plugin=tk-inter \
+            --windowed \
+            --output-filename=VaultKey \
+            "$ROOT/wallet/ui/gui.py"
+        ;;
+    *)
+        echo -e "${RED}Unknown target: $TARGET. Use: cli | gui${NC}"
+        exit 1
+        ;;
 esac
 
-echo ""
-echo "====================================================="
-echo " Nuitka build complete!"
-echo "====================================================="
-ls -lh "$DIST"
+echo -e "\n  ${GREEN}Nuitka build complete. Artifacts in $ROOT/dist-nuitka/${NC}\n"

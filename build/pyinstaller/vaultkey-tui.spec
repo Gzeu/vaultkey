@@ -1,63 +1,57 @@
 # -*- mode: python ; coding: utf-8 -*-
 # VaultKey TUI — PyInstaller spec
-# Produces: vaultkey-tui (single-file, terminal UI via Textual)
+# Produces a single-file executable for the Textual TUI interface.
 
 import sys
 from pathlib import Path
 
 ROOT = Path(SPECPATH).parent.parent
 
-# Collect all Textual CSS/assets — required for Textual to render
-from PyInstaller.utils.hooks import collect_data_files, collect_submodules
-
-textual_datas = collect_data_files('textual')
-textual_hidden = collect_submodules('textual')
-
 a = Analysis(
     [str(ROOT / 'wallet' / 'ui' / 'tui.py')],
     pathex=[str(ROOT)],
     binaries=[],
     datas=[
-        *textual_datas,
-        # tui_import companion module
-        (str(ROOT / 'wallet' / 'ui' / 'tui_import.py'), 'wallet/ui'),
+        (str(ROOT / 'wallet'), 'wallet'),
+        # Textual ships CSS files that must be bundled
+        ('$(python -c "import textual; print(textual.__path__[0])")', 'textual'),
     ],
     hiddenimports=[
-        *textual_hidden,
-        'textual.app',
-        'textual.widgets',
-        'textual.widgets._data_table',
-        'textual.widgets._input',
-        'textual.widgets._button',
-        'textual.widgets._static',
-        'textual.widgets._label',
-        'textual.widgets._tabs',
-        'textual.widgets._tab_pane',
-        'textual.css.query',
-        'textual.reactive',
-        'textual.binding',
         'argon2._utils',
-        'argon2._ffi',
+        'argon2.low_level',
+        'cryptography.hazmat.backends.openssl',
+        'cryptography.hazmat.bindings._rust',
         'cryptography.hazmat.primitives.ciphers.aead',
         'cryptography.hazmat.primitives.kdf.hkdf',
-        'cryptography.hazmat.bindings._rust',
-        'rich.logging',
-        'pydantic',
-        'pydantic_settings',
+        'pydantic.deprecated.class_validators',
+        'pydantic.deprecated.config',
+        # Textual internals
+        'textual',
+        'textual.app',
+        'textual.widgets',
+        'textual.widgets._button',
+        'textual.widgets._input',
+        'textual.widgets._label',
+        'textual.widgets._list_view',
+        'textual.widgets._data_table',
+        'textual.widgets._tabs',
+        'textual.widgets._static',
+        'textual.widgets._footer',
+        'textual.widgets._header',
+        'textual.screen',
+        'textual.containers',
+        'textual.binding',
+        'textual.reactive',
+        'textual.css.query',
+        'rich.console',
+        'rich.segment',
         'pyperclip',
         'httpx',
-        'wallet.core.crypto',
-        'wallet.core.kdf',
-        'wallet.core.session',
-        'wallet.core.storage',
-        'wallet.core.integrity',
-        'wallet.core.health',
-        'wallet.core.rotate',
-        'wallet.core.wipe',
-        'wallet.models',
-        'wallet.utils',
+        'anyio',
+        'anyio._backends._asyncio',
+        'sniffio',
     ],
-    hookspath=['build/pyinstaller/hooks'],
+    hookspath=[str(ROOT / 'build' / 'pyinstaller' / 'hooks')],
     hooksconfig={},
     runtime_hooks=[],
     excludes=[
@@ -65,8 +59,7 @@ a = Analysis(
         'tkinter',
         '_tkinter',
         'PIL',
-        'matplotlib',
-        'numpy',
+        'Pillow',
     ],
     noarchive=False,
     optimize=2,
@@ -85,7 +78,7 @@ exe = EXE(
     bootloader_ignore_signals=False,
     strip=True,
     upx=True,
-    upx_exclude=[],
+    upx_exclude=['vcruntime140.dll'],
     runtime_tmpdir=None,
     console=True,
     disable_windowed_traceback=False,
@@ -93,5 +86,4 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=str(ROOT / 'docs' / 'assets' / 'icon.ico') if (ROOT / 'docs' / 'assets' / 'icon.ico').exists() else None,
 )
