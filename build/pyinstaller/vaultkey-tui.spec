@@ -1,57 +1,48 @@
 # -*- mode: python ; coding: utf-8 -*-
 # VaultKey TUI — PyInstaller spec
-# Produces a single-file executable for the Textual TUI interface.
+# Produces: vaultkey-tui(.exe)
 
 import sys
 from pathlib import Path
 
 ROOT = Path(SPECPATH).parent.parent
 
+# Collect all Textual CSS/assets
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules
+
+textual_datas = collect_data_files('textual')
+
 a = Analysis(
     [str(ROOT / 'wallet' / 'ui' / 'tui.py')],
     pathex=[str(ROOT)],
     binaries=[],
     datas=[
-        (str(ROOT / 'wallet'), 'wallet'),
-        # Textual ships CSS files that must be bundled
-        ('$(python -c "import textual; print(textual.__path__[0])")', 'textual'),
+        *textual_datas,
     ],
     hiddenimports=[
+        'argon2',
         'argon2._utils',
         'argon2.low_level',
-        'cryptography.hazmat.backends.openssl',
-        'cryptography.hazmat.bindings._rust',
+        'cryptography',
         'cryptography.hazmat.primitives.ciphers.aead',
         'cryptography.hazmat.primitives.kdf.hkdf',
-        'pydantic.deprecated.class_validators',
-        'pydantic.deprecated.config',
-        # Textual internals
+        'cryptography.hazmat.primitives.hmac',
+        'cryptography.hazmat.backends.openssl',
+        'cryptography.hazmat.backends.openssl.backend',
+        'pydantic',
+        'pydantic_settings',
+        'typer',
+        'rich',
         'textual',
         'textual.app',
         'textual.widgets',
-        'textual.widgets._button',
-        'textual.widgets._input',
-        'textual.widgets._label',
-        'textual.widgets._list_view',
-        'textual.widgets._data_table',
-        'textual.widgets._tabs',
-        'textual.widgets._static',
-        'textual.widgets._footer',
-        'textual.widgets._header',
-        'textual.screen',
         'textual.containers',
-        'textual.binding',
-        'textual.reactive',
+        'textual.screen',
+        'textual.css',
         'textual.css.query',
-        'rich.console',
-        'rich.segment',
         'pyperclip',
-        'httpx',
-        'anyio',
-        'anyio._backends._asyncio',
-        'sniffio',
-    ],
-    hookspath=[str(ROOT / 'build' / 'pyinstaller' / 'hooks')],
+    ] + collect_submodules('textual'),
+    hookspath=['build/pyinstaller/hooks'],
     hooksconfig={},
     runtime_hooks=[],
     excludes=[
@@ -59,10 +50,12 @@ a = Analysis(
         'tkinter',
         '_tkinter',
         'PIL',
-        'Pillow',
+        'matplotlib',
+        'numpy',
+        'pandas',
     ],
     noarchive=False,
-    optimize=2,
+    optimize=1,
 )
 
 pyz = PYZ(a.pure)

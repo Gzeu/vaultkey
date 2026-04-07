@@ -1,67 +1,96 @@
 #!/usr/bin/env bash
-# VaultKey — Nuitka build script (alternative to PyInstaller)
-# Use Nuitka for:
-#   - Better startup performance (compiled to C)
-#   - Harder reverse engineering
-#   - More reliable with complex C extension trees
-# Usage: bash build/nuitka/build-all.sh [cli|gui] [version]
+# VaultKey Nuitka build — performance-optimized alternative to PyInstaller
+# Use when PyInstaller binary is too large or startup is too slow.
+# Nuitka compiles Python to C, resulting in faster startup + smaller footprint.
+#
+# Usage: bash build/nuitka/build-all.sh [cli|gui|tui|all]
 # Requires: pip install nuitka ordered-set zstandard
 
 set -euo pipefail
 
-TARGET="${1:-cli}"
-VERSION="${2:-2.0.0}"
-ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-DIST="$ROOT/dist/nuitka"
+TARGET=${1:-all}
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+DIST_DIR="${PROJECT_ROOT}/dist/nuitka"
+mkdir -p "${DIST_DIR}"
 
-echo "==> VaultKey Nuitka Build v$VERSION — $TARGET"
-mkdir -p "$DIST"
+VERSION=$(python -c "import wallet; print(wallet.__version__)" 2>/dev/null || echo "2.0.0")
+OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+ARCH=$(uname -m)
 
-python3 -m nuitka --version &>/dev/null || pip3 install nuitka ordered-set zstandard
+echo "==> Nuitka build: target=${TARGET} version=${VERSION} os=${OS} arch=${ARCH}"
 
-COMMON_FLAGS=(
-    --standalone
-    --onefile
-    --assume-yes-for-downloads
-    --python-flag=no_site
-    --python-flag=no_warnings
-    --python-flag=isolated
-    --include-package=wallet
-    --include-package=cryptography
-    --include-package=argon2
-    --include-package=pydantic
-    --include-package=pydantic_settings
-    --include-package=httpx
-    --include-package=rich
-    --output-dir="$DIST"
-    --remove-output
-)
-
-if [ "$TARGET" = 'cli' ] || [ "$TARGET" = 'all' ]; then
+build_cli() {
     echo "==> Compiling CLI..."
-    python3 -m nuitka \
-        "${COMMON_FLAGS[@]}" \
+    python -m nuitka \
+        --onefile \
+        --standalone \
+        --assume-yes-for-downloads \
+        --output-dir="${DIST_DIR}" \
+        --output-filename="vaultkey-${VERSION}-${OS}-${ARCH}" \
+        --include-package=wallet \
+        --include-package=argon2 \
+        --include-package=cryptography \
+        --include-package=pydantic \
         --include-package=typer \
-        --include-package=click \
-        --include-package=pyperclip \
-        --output-filename="vaultkey" \
-        "$ROOT/wallet/ui/cli.py"
-    echo "    OK -> dist/nuitka/vaultkey"
-fi
+        --include-package=rich \
+        --nofollow-import-to=textual \
+        --nofollow-import-to=customtkinter \
+        --nofollow-import-to=tkinter \
+        --python-flag=no_site \
+        --python-flag=no_warnings \
+        wallet/ui/cli.py
+    echo "==> CLI done."
+}
 
-if [ "$TARGET" = 'gui' ] || [ "$TARGET" = 'all' ]; then
+build_gui() {
     echo "==> Compiling GUI..."
-    python3 -m nuitka \
-        "${COMMON_FLAGS[@]}" \
+    python -m nuitka \
+        --onefile \
+        --standalone \
+        --assume-yes-for-downloads \
+        --output-dir="${DIST_DIR}" \
+        --output-filename="vaultkey-gui-${VERSION}-${OS}-${ARCH}" \
+        --include-package=wallet \
+        --include-package=argon2 \
+        --include-package=cryptography \
+        --include-package=pydantic \
         --include-package=customtkinter \
-        --include-package=tkinter \
-        --include-data-dir="$(python3 -c 'import customtkinter; import os; print(os.path.dirname(customtkinter.__file__))')"=customtkinter \
-        --windows-disable-console \
-        --output-filename="vaultkey-gui" \
-        "$ROOT/wallet/ui/gui.py"
-    echo "    OK -> dist/nuitka/vaultkey-gui"
-fi
+        --include-data-dir="$(python -c 'import customtkinter; import os; print(os.path.dirname(customtkinter.__file__))')=customtkinter" \
+        --enable-plugin=tk-inter \
+        --nofollow-import-to=textual \
+        --python-flag=no_site \
+        wallet/ui/gui.py
+    echo "==> GUI done."
+}
+
+build_tui() {
+    echo "==> Compiling TUI..."
+    python -m nuitka \
+        --onefile \
+        --standalone \
+        --assume-yes-for-downloads \
+        --output-dir="${DIST_DIR}" \
+        --output-filename="vaultkey-tui-${VERSION}-${OS}-${ARCH}" \
+        --include-package=wallet \
+        --include-package=argon2 \
+        --include-package=cryptography \
+        --include-package=pydantic \
+        --include-package=textual \
+        --include-data-dir="$(python -c 'import textual; import os; print(os.path.dirname(textual.__file__))')=textual" \
+        --nofollow-import-to=customtkinter \
+        --nofollow-import-to=tkinter \
+        --python-flag=no_site \
+        wallet/ui/tui.py
+    echo "==> TUI done."
+}
+
+case "${TARGET}" in
+    cli) build_cli ;;
+    gui) build_gui ;;
+    tui) build_tui ;;
+    all) build_cli; build_gui; build_tui ;;
+    *) echo "Usage: $0 [cli|gui|tui|all]" >&2; exit 1 ;;
+esac
 
 echo ""
-echo "==> Nuitka build done."
-ls -lh "$DIST"
+echo "==> All done. Output in dist/nuitka/"

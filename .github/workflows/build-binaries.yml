@@ -1,0 +1,235 @@
+name: Build Binaries
+# Triggered on:
+#   - Release tags (v2.x.x)  → full matrix, attaches to GitHub Release
+#   - Manual dispatch         → test specific OS/target
+#   - Push to feat/v2-build-pipeline (CI validation only, no upload)
+
+on:
+  push:
+    tags:
+      - 'v2.[0-9]+.[0-9]+'
+      - 'v2.[0-9]+.[0-9]+-*'
+    branches:
+      - 'feat/v2-build-pipeline'
+  workflow_dispatch:
+    inputs:
+      target_os:
+        description: 'OS to build on'
+        required: false
+        default: 'all'
+        type: choice
+        options: [all, windows, linux, macos]
+      build_type:
+        description: 'What to build'
+        required: false
+        default: 'both'
+        type: choice
+        options: [both, cli, gui]
+
+permissions:
+  contents: write
+
+jobs:
+  # ────────────────────────────────────────────────────────────────
+  # Determine which OS matrix to run
+  # ────────────────────────────────────────────────────────────────
+  matrix-setup:
+    name: Determine build matrix
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - id: set-matrix
+        run: |
+          TARGET="${{ github.event.inputs.target_os || 'all' }}"
+          if [ "$TARGET" = "windows" ]; then
+            echo 'matrix={"os":["windows-latest"]}' >> $GITHUB_OUTPUT
+          elif [ "$TARGET" = "linux" ]; then
+            echo 'matrix={"os":["ubuntu-22.04"]}' >> $GITHUB_OUTPUT
+          elif [ "$TARGET" = "macos" ]; then
+            echo 'matrix={"os":["macos-13"]}' >> $GITHUB_OUTPUT
+          else
+            echo 'matrix={"os":["windows-latest","ubuntu-22.04","macos-13"]}' >> $GITHUB_OUTPUT
+          fi
+
+  # ────────────────────────────────────────────────────────────────
+  # Cross-platform binary build
+  # ────────────────────────────────────────────────────────────────
+  build:
+    name: Build — ${{ matrix.os }}
+    needs: matrix-setup
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.matrix-setup.outputs.matrix) }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      # ── Linux: system deps for tkinter + ffi ──────────────────────
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y \
+            python3-tk \
+            libffi-dev \
+            libssl-dev \
+            upx-ucl \
+            fuse \
+            libglib2.0-0 \
+            libgtk-3-0 \
+            libdbus-1-3
+
+      # ── macOS: system deps ─────────────────────────────────────────
+      - name: Install system dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install upx || true
+          # create-dmg for distribution
+          brew install create-dmg || true
+
+      # ── Windows: UPX ───────────────────────────────────────────────
+      - name: Install UPX (Windows)
+        if: runner.os == 'Windows'
+        uses: crazy-max/ghaction-upx@v3
+        with:
+          install-only: true
+
+      # ── Python deps ────────────────────────────────────────────────
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+          pip install pyinstaller>=6.5
+          # Pillow needed by customtkinter in some environments
+          pip install Pillow || true
+
+      # ── Extract version ─────────────────────────────────────────────
+      - name: Extract version
+        id: version
+        shell: bash
+        run: |
+          VER=$(python -c "import wallet; print(wallet.__version__)" 2>/dev/null || echo "2.0.0")
+          echo "version=${VER}" >> $GITHUB_OUTPUT
+          echo "Version: ${VER}"
+
+      # ── Build CLI binary ────────────────────────────────────────────
+      - name: Build CLI binary
+        if: ${{ github.event.inputs.build_type != 'gui' }}
+        shell: bash
+        run: |
+          pyinstaller --clean --noconfirm build/pyinstaller/vaultkey-cli.spec
+
+      # ── Build GUI binary ────────────────────────────────────────────
+      - name: Build GUI binary
+        if: ${{ github.event.inputs.build_type != 'cli' }}
+        shell: bash
+        run: |
+          pyinstaller --clean --noconfirm build/pyinstaller/vaultkey-gui.spec
+
+      # ── Linux: package AppImage ─────────────────────────────────────
+      - name: Package AppImage (Linux)
+        if: runner.os == 'Linux' && github.event.inputs.build_type != 'cli'
+        shell: bash
+        run: |
+          bash build/linux/build-appimage.sh || echo "WARN: AppImage packaging failed, using raw binary"
+
+      # ── macOS: optional codesign (skipped in CI unless secret set) ──
+      - name: Sign .app bundle (macOS)
+        if: runner.os == 'macOS' && env.CODESIGN_IDENTITY != ''
+        env:
+          CODESIGN_IDENTITY: ${{ secrets.MACOS_CODESIGN_IDENTITY }}
+        run: |
+          bash build/macos/build-macos.sh --sign
+
+      # ── Rename & collect artifacts ──────────────────────────────────
+      - name: Collect and rename artifacts
+        id: artifacts
+        shell: bash
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          mkdir -p dist/release
+
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            [ -f dist/vaultkey.exe ] && \
+              mv dist/vaultkey.exe "dist/release/VaultKey-${VERSION}-windows-x64.exe"
+            [ -f dist/vaultkey-gui.exe ] && \
+              mv dist/vaultkey-gui.exe "dist/release/VaultKey-${VERSION}-windows-x64-gui.exe"
+
+          elif [ "$RUNNER_OS" = "Linux" ]; then
+            [ -f dist/vaultkey ] && \
+              mv dist/vaultkey "dist/release/vaultkey-${VERSION}-linux-x86_64"
+            chmod +x dist/release/vaultkey-* 2>/dev/null || true
+            # AppImage (if built)
+            find dist/ -name '*.AppImage' -exec mv {} dist/release/ \;
+
+          elif [ "$RUNNER_OS" = "macOS" ]; then
+            [ -f dist/vaultkey ] && \
+              mv dist/vaultkey "dist/release/vaultkey-${VERSION}-macos-x86_64"
+            chmod +x dist/release/vaultkey-* 2>/dev/null || true
+            # .app bundle → zip for distribution
+            if [ -d dist/VaultKey.app ]; then
+              cd dist && zip -r "release/VaultKey-${VERSION}-macos.app.zip" VaultKey.app
+            fi
+          fi
+
+          # SHA256 checksums
+          cd dist/release
+          sha256sum * > SHA256SUMS.txt 2>/dev/null || shasum -a 256 * > SHA256SUMS.txt
+          echo "==> Artifacts in dist/release/:"
+          ls -lh
+
+      # ── Upload artifacts for release job ───────────────────────────
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: binaries-${{ matrix.os }}
+          path: dist/release/
+          retention-days: 7
+          if-no-files-found: warn
+
+  # ────────────────────────────────────────────────────────────────
+  # Attach binaries to GitHub Release (tag pushes only)
+  # ────────────────────────────────────────────────────────────────
+  attach-release:
+    name: Attach to GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v2.')
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: all-binaries/
+          merge-multiple: true
+
+      - name: List collected artifacts
+        run: ls -lhR all-binaries/
+
+      - name: Merge SHA256SUMS
+        run: |
+          cat all-binaries/**/SHA256SUMS.txt 2>/dev/null > all-binaries/SHA256SUMS.txt || true
+          # Deduplicate
+          sort -u all-binaries/SHA256SUMS.txt -o all-binaries/SHA256SUMS.txt
+
+      - name: Attach to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            all-binaries/**/*.exe
+            all-binaries/**/*.AppImage
+            all-binaries/**/*.zip
+            all-binaries/**/vaultkey-*
+            all-binaries/**/VaultKey-*
+            all-binaries/SHA256SUMS.txt
+          fail_on_unmatched_files: false

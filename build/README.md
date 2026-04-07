@@ -1,124 +1,137 @@
-# VaultKey — Build System
+# VaultKey Build System
 
-This folder contains everything needed to produce distributable binaries for all three platforms.
-
-## Quick Start
-
-### Windows
-```powershell
-# CLI + GUI (recommended)
-.\build\scripts\build-windows.ps1 -Target all -Version 2.0.0
-
-# CLI only (faster, smaller)
-.\build\scripts\build-windows.ps1 -Target cli
-```
-Output: `dist/windows/vaultkey.exe`, `dist/windows/vaultkey-gui.exe`
-
-### Linux
-```bash
-bash build/scripts/build-linux.sh all 2.0.0
-```
-Output:
-- `dist/linux/vaultkey` — CLI binary (raw ELF, ~15-25MB)
-- `dist/linux/vaultkey-tui` — TUI binary
-- `dist/linux/VaultKey-2.0.0-x86_64.AppImage` — portable GUI
-
-### macOS
-```bash
-bash build/scripts/build-macos.sh all 2.0.0
-```
-Output:
-- `dist/macos/vaultkey` — CLI binary
-- `dist/macos/VaultKey.app` — GUI .app bundle (unsigned by default)
-- `dist/macos/VaultKey-2.0.0.dmg` — DMG (requires `brew install create-dmg`)
-
-For signed builds, set env vars before running:
-```bash
-export CODESIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)"
-export APPLE_TEAM_ID="YOURTEAMID"
-bash build/scripts/build-macos.sh gui 2.0.0
-```
-
-## GitHub Actions (Automated)
-
-The build pipeline is fully automated via:
-- **`.github/workflows/release.yml`** — triggered by pushing a version tag (`git tag v2.0.0 && git push --tags`)
-- **`.github/workflows/ci.yml`** — runs on every push/PR (lint + typecheck + tests + security scan)
-
-### Releasing v2.0.0
-```bash
-git tag -a v2.0.0 -m "VaultKey v2.0.0"
-git push origin v2.0.0
-```
-This triggers the matrix build (6 jobs in parallel) and creates a GitHub Release with all binaries attached.
-
-### Required GitHub Secrets
-
-| Secret | Required | Description |
-|---|---|---|
-| `MACOS_CODESIGN_IDENTITY` | Optional | e.g. `Developer ID Application: Name (TEAMID)` |
-| `MACOS_CERTIFICATE` | Optional | Base64-encoded `.p12` certificate |
-| `MACOS_CERTIFICATE_PWD` | Optional | Password for the `.p12` cert |
-| `APPLE_TEAM_ID` | Optional | For notarization |
-| `GITHUB_TOKEN` | Auto | Provided by GitHub Actions automatically |
-
-Without the macOS secrets, builds are **unsigned** — still functional, users need to right-click → Open on first launch.
+This directory contains all build configuration for producing distributable binaries of VaultKey.
 
 ## Structure
 
 ```
 build/
-├── pyinstaller/
-│   ├── vaultkey-cli.spec       # CLI spec (console=True, minimal deps)
-│   ├── vaultkey-tui.spec       # TUI spec (Textual + all CSS assets bundled)
-│   ├── vaultkey-gui.spec       # GUI spec (CustomTkinter + .app bundle on macOS)
-│   └── hooks/
-│       ├── hook-argon2.py      # Ensures argon2-cffi CFFI binary is collected
-│       ├── hook-cryptography.py # Ensures Rust extension is collected
-│       └── hook-wallet.py      # Collects all wallet submodules
-├── nuitka/
-│   └── build-all.sh            # Alternative: compile to C (better perf, harder to RE)
-├── macos/
-│   └── entitlements.plist      # Hardened runtime entitlements for codesign
-├── scripts/
-│   ├── build-windows.ps1       # Windows PowerShell build
-│   ├── build-linux.sh          # Linux build + AppImage packaging
-│   └── build-macos.sh          # macOS build + codesign + DMG
-└── README.md                   # This file
+├── pyinstaller/          # PyInstaller specs (primary build method)
+│   ├── vaultkey-cli.spec     # CLI-only binary (~15-25 MB)
+│   ├── vaultkey-tui.spec     # TUI binary with Textual bundled (~40-60 MB)
+│   ├── vaultkey-gui.spec     # GUI binary with CustomTkinter (~60-90 MB)
+│   └── hooks/                # Custom PyInstaller hooks for argon2 + cryptography
+│       ├── hook-argon2.py
+│       └── hook-cryptography.py
+├── nuitka/               # Nuitka fallback (faster startup, smaller size)
+│   └── build-all.sh
+├── linux/                # Linux-specific
+│   ├── build-appimage.sh     # AppImage packaging script
+│   └── vaultkey.desktop      # .desktop entry for AppImage
+├── macos/                # macOS-specific
+│   ├── build-macos.sh        # .app + codesign + DMG
+│   └── entitlements.plist    # Hardened Runtime entitlements
+└── windows/              # Windows-specific
+    └── build-windows.ps1     # PowerShell build script
 ```
+
+## Quick Start
+
+### Prerequisites
+
+```bash
+pip install pyinstaller>=6.5
+# Optional but recommended:
+pip install Pillow  # for CTk icon support
+# UPX for compression (reduces .exe size ~40%):
+#   Windows: winget install upx
+#   Linux:   sudo apt install upx-ucl
+#   macOS:   brew install upx
+```
+
+### Build Locally
+
+**Windows (PowerShell):**
+```powershell
+.\build\windows\build-windows.ps1
+```
+
+**Linux:**
+```bash
+# CLI only (fast, ~20MB)
+pyinstaller --clean --noconfirm build/pyinstaller/vaultkey-cli.spec
+
+# GUI + AppImage
+bash build/linux/build-appimage.sh
+```
+
+**macOS:**
+```bash
+# Unsigned (for local use)
+bash build/macos/build-macos.sh
+
+# Signed (requires Apple Developer ID)
+export CODESIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)"
+bash build/macos/build-macos.sh --sign --dmg
+```
+
+**Nuitka (all platforms, faster startup):**
+```bash
+bash build/nuitka/build-all.sh cli    # CLI only
+bash build/nuitka/build-all.sh all    # All targets
+```
+
+## GitHub Actions
+
+The `build-binaries.yml` workflow:
+- **On tag push** `v2.x.x`: builds Windows + Linux + macOS, attaches binaries to GitHub Release
+- **Manual dispatch**: select specific OS and CLI/GUI target
+- **On branch push** `feat/v2-build-pipeline`: validates the build without uploading
+
+### Setting Up Secrets
+
+For macOS code signing (optional, for App Store / Gatekeeper trust):
+```
+GitHub repo → Settings → Secrets and variables → Actions
+
+Secret name: MACOS_CODESIGN_IDENTITY
+Value:        Developer ID Application: Your Name (ABCDE12345)
+```
+
+For the full notarization pipeline (post v2.0):
+```
+APPLE_ID              → your@email.com
+APPLE_ID_PASSWORD     → app-specific-password from appleid.apple.com
+APPLE_TEAM_ID         → ABCDE12345
+```
+
+## Binary Sizes (Estimated)
+
+| Binary | Windows | Linux | macOS |
+|--------|---------|-------|-------|
+| `vaultkey` (CLI) | ~25 MB | ~22 MB | ~24 MB |
+| `vaultkey-gui` (GUI) | ~80 MB | ~75 MB | ~85 MB |
+| `VaultKey.AppImage` | — | ~80 MB | — |
+| `VaultKey.app.zip` | — | — | ~90 MB |
+
+> Sizes with UPX enabled. Without UPX: +40% approximately.
 
 ## Troubleshooting
 
-### `ModuleNotFoundError: cryptography` at runtime
-The `cryptography` package uses a Rust extension (`_rust.pyd`/`.so`). If it's not bundled:
+### `argon2` not found at runtime
+Ensure the `hook-argon2.py` hook is found. PyInstaller must be run from the **project root**:
 ```bash
-pip show cryptography  # check version
-# Make sure hook-cryptography.py is in build/pyinstaller/hooks/
+cd /path/to/vaultkey
+pyinstaller --clean --noconfirm build/pyinstaller/vaultkey-cli.spec
 ```
 
-### `argon2` binary missing
-argon2-cffi uses CFFI. Ensure the hook is active and your venv path is correct in the spec file.
-
-### CustomTkinter theme not found at runtime (GUI)
-CTk loads theme JSON files dynamically. The `collect_data_files('customtkinter')` call in the spec handles this, but verify the `datas` tuple path matches your venv.
-
-### macOS: `app is damaged and can't be opened`
-This happens with unsigned builds. Fix:
+### `customtkinter` missing themes
+The `collect_data_files('customtkinter')` call in the spec handles this. If themes are missing, run:
 ```bash
-xattr -cr VaultKey.app
-```
-Or quarantine remove:
-```bash
-xattr -d com.apple.quarantine VaultKey.app
+python -c "import customtkinter; print(customtkinter.__file__)"
+# Verify the themes folder exists next to __init__.py
 ```
 
-### AppImage: `FUSE` error on Linux
+### macOS: "App is damaged and can't be opened"
 ```bash
-sudo apt install libfuse2   # Ubuntu 22.04+
+xattr -cr dist/VaultKey.app
 ```
 
-### Binary too large (>100MB)
-- UPX compression is enabled by default (`upx=True` in spec)
-- `optimize=2` strips docstrings
-- Check `excludes` list in spec — add more unused packages
-- Consider Nuitka build for GUI (better DCE)
+### Linux: AppImage won't run — FUSE error
+```bash
+# Either install FUSE:
+sudo apt install fuse libfuse2
+# Or extract and run directly:
+./VaultKey-2.0.0-linux-x86_64.AppImage --appimage-extract
+./squashfs-root/AppRun
+```

@@ -1,6 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
 # VaultKey CLI — PyInstaller spec
-# Produces a single-file executable for the CLI interface.
+# Produces a single-file executable: vaultkey-cli(.exe on Windows)
 
 import sys
 from pathlib import Path
@@ -12,49 +12,44 @@ a = Analysis(
     pathex=[str(ROOT)],
     binaries=[],
     datas=[
-        (str(ROOT / 'wallet'), 'wallet'),
+        # Argon2-cffi native libs
+        (str(ROOT / '.venv' / 'Lib' / 'site-packages' / 'argon2') if sys.platform == 'win32'
+         else str(ROOT / '.venv' / 'lib'), 'argon2'),
     ],
     hiddenimports=[
-        # argon2-cffi native bindings
+        'argon2',
         'argon2._utils',
         'argon2.low_level',
-        # cryptography hazmat backends
-        'cryptography.hazmat.backends.openssl',
-        'cryptography.hazmat.bindings._rust',
+        'cryptography',
         'cryptography.hazmat.primitives.ciphers.aead',
         'cryptography.hazmat.primitives.kdf.hkdf',
-        'cryptography.hazmat.primitives.kdf.scrypt',
-        # pydantic
-        'pydantic.deprecated.class_validators',
-        'pydantic.deprecated.config',
-        'pydantic.deprecated.tools',
-        # typer / click internals
+        'cryptography.hazmat.primitives.hmac',
+        'cryptography.hazmat.backends.openssl',
+        'cryptography.hazmat.backends.openssl.backend',
+        'pydantic',
+        'pydantic_settings',
         'typer',
-        'click',
+        'rich',
         'rich.console',
-        'rich.traceback',
-        'rich.table',
         'rich.panel',
-        'rich.progress',
-        'rich.prompt',
-        # pyperclip backends
+        'rich.table',
         'pyperclip',
-        # httpx
-        'httpx',
-        'anyio',
-        'sniffio',
     ],
-    hookspath=[str(ROOT / 'build' / 'pyinstaller' / 'hooks')],
+    hookspath=['build/pyinstaller/hooks'],
     hooksconfig={},
     runtime_hooks=[],
     excludes=[
-        # Exclude GUI/TUI deps from CLI binary
-        'customtkinter',
         'textual',
+        'customtkinter',
         'tkinter',
         '_tkinter',
         'PIL',
-        'Pillow',
+        'matplotlib',
+        'numpy',
+        'pandas',
+        'scipy',
+        'IPython',
+        'jupyter',
     ],
     noarchive=False,
     optimize=2,
@@ -73,7 +68,7 @@ exe = EXE(
     bootloader_ignore_signals=False,
     strip=True,
     upx=True,
-    upx_exclude=['vcruntime140.dll', 'python*.dll'],
+    upx_exclude=['vcruntime140.dll', 'python3*.dll'],
     runtime_tmpdir=None,
     console=True,
     disable_windowed_traceback=False,
@@ -81,6 +76,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=str(ROOT / 'build' / 'assets' / 'icon.ico') if sys.platform == 'win32' else None,
-    version=str(ROOT / 'build' / 'assets' / 'version.txt') if sys.platform == 'win32' else None,
+    icon=str(ROOT / 'assets' / 'icon.ico') if (ROOT / 'assets' / 'icon.ico').exists() else None,
 )

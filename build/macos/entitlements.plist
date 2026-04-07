@@ -3,32 +3,22 @@
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <!-- Hardened Runtime: allow JIT (needed by some CFFI paths) -->
-    <key>com.apple.security.cs.allow-jit</key>
-    <false/>
-
-    <!-- Allow unsigned executable memory (CFFI may need this) -->
-    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
-    <false/>
-
-    <!-- Disable library validation to allow bundled .so files -->
-    <key>com.apple.security.cs.disable-library-validation</key>
-    <true/>
-
-    <!-- Network client access (for webhooks / httpx) -->
-    <key>com.apple.security.network.client</key>
-    <true/>
-
-    <!-- Keychain access (for future biometric / Keychain integration) -->
+    <!-- Required for Keychain access (future biometric auth) -->
     <key>keychain-access-groups</key>
     <array>
-        <string>$(AppIdentifierPrefix)io.vaultkey.app</string>
+        <string>io.vaultkey.app</string>
     </array>
-
-    <!-- Future: Touch ID / LocalAuthentication -->
-    <!-- Uncomment when biometric auth is implemented:
-    <key>com.apple.security.personal-information.location</key>
+    <!-- App Sandbox disabled: VaultKey is a local CLI/GUI tool, not a sandboxed app -->
+    <!-- Enable if submitting to Mac App Store -->
+    <!-- <key>com.apple.security.app-sandbox</key><true/> -->
+    <key>com.apple.security.cs.allow-jit</key>
     <false/>
-    -->
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <false/>
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+    <!-- Needed by Python ctypes / cffi .dylib loading -->
+    <key>com.apple.security.cs.allow-dyld-environment-variables</key>
+    <false/>
 </dict>
 </plist>
