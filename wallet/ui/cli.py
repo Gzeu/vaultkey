@@ -12,6 +12,7 @@ Wave 9: profile, share / share-receive / share-list / share-revoke,
          webhook add / list / remove / test
 Wave 10: note, mvx, gen-password, gen-passphrase, import-external,
           stats, export-report, search-advanced
+Wave 11: bugfix check_expiry kwarg (warn_days)
 """
 
 import json
@@ -123,7 +124,8 @@ def _urgency_color(urgency: str) -> str:
 def _run_expiry_check_silent(payload: WalletPayload) -> None:
     """Auto-check run at unlock — prints warnings only if entries are near expiry."""
     from wallet.utils.expiry_checker import check_expiry
-    warnings = check_expiry(payload, days=7)
+    report = check_expiry(payload, warn_days=7)  # fix: was days=7
+    warnings = report.warning + report.expired
     if not warnings:
         return
     console.print(
@@ -597,9 +599,8 @@ def expiry_check(
     key = _require_unlocked()
     payload = _load_payload(key)
     from wallet.utils.expiry_checker import check_expiry
-    warnings = check_expiry(payload, days=days)
-    if not all_entries:
-        warnings = [w for w in warnings if not w.is_expired]
+    report = check_expiry(payload, warn_days=days)  # fix: was days=days
+    warnings = report.warning + (report.expired if all_entries else [])
     if not warnings:
         console.print(f"[green]✓ No keys expiring within {days} day(s).[/green]")
         raise typer.Exit(0)
@@ -609,12 +610,17 @@ def expiry_check(
     table.add_column("Expires", justify="center")
     table.add_column("Days left", justify="right")
     table.add_column("Urgency", justify="center")
-    for w in warnings:
-        uc = _urgency_color(w.urgency)
-        days_str = "EXPIRED" if w.is_expired else str(w.days_left)
+    now = datetime.now(timezone.utc)
+    for entry in warnings:
+        is_exp = entry.expires_at is not None and entry.expires_at <= now
+        days_left = (entry.expires_at - now).days if entry.expires_at and not is_exp else 0
+        urgency = "expired" if is_exp else ("critical" if days_left <= 3 else "warning")
+        uc = _urgency_color(urgency)
+        days_str = "EXPIRED" if is_exp else str(days_left)
         table.add_row(
-            w.name, w.service, w.expires_at.strftime("%Y-%m-%d"),
-            f"[{uc}]{days_str}[/{uc}]", f"[{uc}]{w.urgency}[/{uc}]",
+            entry.name, entry.service,
+            entry.expires_at.strftime("%Y-%m-%d") if entry.expires_at else "—",
+            f"[{uc}]{days_str}[/{uc}]", f"[{uc}]{urgency}[/{uc}]",
         )
     console.print(table)
     console.print(f"[dim]{len(warnings)} key(s) found[/dim]")
