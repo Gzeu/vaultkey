@@ -1,0 +1,6 @@
+# Binary assets — add these manually before building
+*.ico
+*.icns
+*.png
+*.dmg
+version.txt

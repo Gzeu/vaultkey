@@ -1,0 +1,11 @@
+[Desktop Entry]
+Version=2.0
+Type=Application
+Name=VaultKey
+Comment=Ultra-secure API key manager for developers
+Exec=vaultkey-gui
+Icon=vaultkey
+Terminal=false
+Categories=Utility;Security;
+Keywords=password;api;key;vault;security;encryption;
+StartupWMClass=VaultKey

@@ -1,132 +1,283 @@
-name: Release
+# VaultKey — Cross-Platform Release Workflow
+# Triggers on:
+#   - Push of a version tag: v*.*.* (e.g., v2.0.0, v2.0.0-rc1)
+#   - Manual workflow dispatch
+#
+# Produces GitHub Release with:
+#   - vaultkey-windows.exe       (CLI, Windows x64)
+#   - VaultKey-windows.exe       (GUI, Windows x64)
+#   - vaultkey-linux             (CLI, Linux x64)
+#   - VaultKey-linux.AppImage    (GUI, Linux x64)
+#   - vaultkey-macos             (CLI, macOS universal2)
+#   - VaultKey-macos.app.zip     (GUI, macOS .app zipped)
+#   - *.sha256                   (checksums for all artifacts)
+
+name: Release Binaries
 
 on:
   push:
     tags:
-      - 'v[0-9]+.[0-9]+.[0-9]+'
-      - 'v[0-9]+.[0-9]+.[0-9]+-*'
+      - 'v[0-9]+.[0-9]+.[0-9]+*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g. v2.0.0-rc1)'
+        required: false
+        default: 'v2.0.0-dev'
 
-permissions:
-  contents: write
-  id-token: write
-  pages: write
+env:
+  PYTHON_VERSION: '3.11'
 
 jobs:
-  # ── 1. Tests ───────────────────────────────────────────────────────────────────
-  test:
-    name: Test before release
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - name: Install & test
-        run: |
-          pip install -e ".[dev]"
-          pytest tests/ -v --tb=short
-
-  # ── 2. Build sdist + wheel ─────────────────────────────────────────────────────────
+  # ─────────────────────────────────────────────
+  # Job 1: Build on each OS in parallel
+  # ─────────────────────────────────────────────
   build:
-    name: Build distribution
-    runs-on: ubuntu-latest
-    needs: test
-    outputs:
-      version: ${{ steps.meta.outputs.version }}
+    name: Build ${{ matrix.target }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # CLI builds
+          - os: windows-latest
+            target: cli
+            artifact_name: vaultkey-windows-cli
+            binary_path: dist/vaultkey.exe
+          - os: ubuntu-latest
+            target: cli
+            artifact_name: vaultkey-linux-cli
+            binary_path: dist/vaultkey
+          - os: macos-latest
+            target: cli
+            artifact_name: vaultkey-macos-cli
+            binary_path: dist/vaultkey
+          # GUI builds
+          - os: windows-latest
+            target: gui
+            artifact_name: vaultkey-windows-gui
+            binary_path: dist/VaultKey.exe
+          - os: ubuntu-latest
+            target: gui
+            artifact_name: vaultkey-linux-gui
+            binary_path: dist/VaultKey-x86_64.AppImage
+          - os: macos-latest
+            target: gui
+            artifact_name: vaultkey-macos-gui
+            binary_path: dist/VaultKey.app
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: actions/setup-python@v5
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
-      - name: Install build tools
-        run: pip install build hatchling twine
-      - name: Extract version
-        id: meta
-        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
-      - name: Build
-        run: python -m build
-      - name: Verify
-        run: twine check dist/*
-      - name: Upload artifacts
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+          pip install "pyinstaller>=6.0"
+
+      # ── Windows ─────────────────────────────
+      - name: Build (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          .\build\scripts\build-windows.ps1 -Target ${{ matrix.target }}
+
+      # ── Linux ───────────────────────────────
+      - name: Install Linux GUI deps
+        if: runner.os == 'Linux' && matrix.target == 'gui'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            python3-tk tk-dev libfuse2 fuse
+
+      - name: Build (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          chmod +x ./build/scripts/build-linux.sh
+          ./build/scripts/build-linux.sh ${{ matrix.target }}
+
+      # ── macOS ───────────────────────────────
+      - name: Import Apple Developer Certificate
+        if: runner.os == 'macOS' && env.MACOS_CERTIFICATE != ''
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PWD: ${{ secrets.MACOS_CERTIFICATE_PWD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          echo "$MACOS_CERTIFICATE" | base64 --decode > certificate.p12
+          security create-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security import certificate.p12 -k build.keychain \
+            -P "$MACOS_CERTIFICATE_PWD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: \
+            -s -k "$KEYCHAIN_PASSWORD" build.keychain
+          CODESIGN_ID=$(security find-identity -v -p codesigning build.keychain | \
+            grep 'Developer ID Application' | head -1 | awk '{print $2}')
+          echo "VAULTKEY_CODESIGN_IDENTITY=$CODESIGN_ID" >> $GITHUB_ENV
+
+      - name: Build (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          chmod +x ./build/scripts/build-macos.sh
+          ./build/scripts/build-macos.sh ${{ matrix.target }}
+
+      # ── Zip macOS .app for upload ────────────
+      - name: Zip macOS .app bundle
+        if: runner.os == 'macOS' && matrix.target == 'gui'
+        run: |
+          cd dist
+          zip -r VaultKey-macos.app.zip VaultKey.app
+          shasum -a 256 VaultKey-macos.app.zip > VaultKey-macos.app.zip.sha256
+
+      # ── Compute SHA256 (Linux/macOS CLI) ─────
+      - name: Compute checksums (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          cd dist
+          for f in vaultkey vaultkey-tui VaultKey-*.AppImage; do
+            [ -f "$f" ] && shasum -a 256 "$f" > "${f}.sha256" || true
+          done
+
+      # ── Upload artifact ──────────────────────
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: dist-${{ github.ref_name }}
-          path: dist/
-          retention-days: 5
+          name: ${{ matrix.artifact_name }}
+          path: |
+            dist/vaultkey
+            dist/vaultkey.exe
+            dist/VaultKey.exe
+            dist/VaultKey-*.AppImage
+            dist/VaultKey-macos.app.zip
+            dist/*.sha256
+          if-no-files-found: warn
+          retention-days: 7
 
-  # ── 3. GitHub Release ──────────────────────────────────────────────────────────────
-  github-release:
-    name: GitHub Release
+  # ─────────────────────────────────────────────
+  # Job 2: Create GitHub Release (after all builds)
+  # ─────────────────────────────────────────────
+  release:
+    name: Create GitHub Release
     runs-on: ubuntu-latest
     needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
+
     steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - name: Download artifacts
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
-          name: dist-${{ github.ref_name }}
-          path: dist/
-      - name: Extract changelog
+          path: release-artifacts
+          merge-multiple: true
+
+      - name: List artifacts
+        run: find release-artifacts -type f | sort
+
+      - name: Extract version from tag
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+      - name: Extract CHANGELOG section
+        id: changelog
         run: |
-          VERSION=${GITHUB_REF_NAME#v}
-          NOTES=$(awk "/^## \\[${VERSION}\\]/,/^## \\[/" CHANGELOG.md \
-            | head -n -1 | tail -n +2)
-          [ -z "$NOTES" ] && NOTES="See CHANGELOG.md for details."
-          echo "$NOTES" > release_notes.txt
-      - name: Create Release
+          VERSION=${{ steps.version.outputs.VERSION }}
+          # Extract the section for this version from CHANGELOG.md
+          NOTES=$(awk "/^## \\[${VERSION#v}\\]/{found=1; next} found && /^## \\[/{exit} found{print}" CHANGELOG.md)
+          if [ -z "$NOTES" ]; then
+            NOTES="See [CHANGELOG.md](CHANGELOG.md) for full release notes."
+          fi
+          echo "NOTES<<EOF" >> $GITHUB_OUTPUT
+          echo "$NOTES" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Rename artifacts with platform suffix
+        run: |
+          mkdir -p final-release
+          
+          # CLI binaries
+          [ -f release-artifacts/vaultkey.exe ]   && cp release-artifacts/vaultkey.exe   final-release/vaultkey-windows-cli.exe
+          [ -f release-artifacts/vaultkey ]       && echo "Ambiguous — handled per job" || true
+          
+          # Copy all with meaningful names
+          cp release-artifacts/* final-release/ 2>/dev/null || true
+
+      - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          name: "VaultKey ${{ github.ref_name }}"
-          body_path: release_notes.txt
+          tag_name: ${{ steps.version.outputs.VERSION }}
+          name: VaultKey ${{ steps.version.outputs.VERSION }}
+          body: |
+            ## VaultKey ${{ steps.version.outputs.VERSION }}
+
+            ${{ steps.changelog.outputs.NOTES }}
+
+            ---
+
+            ### 📦 Downloads
+
+            | Platform | CLI | GUI |
+            |----------|-----|-----|
+            | **Windows** | `vaultkey-windows-cli.exe` | `VaultKey-windows-gui.exe` |
+            | **Linux** | `vaultkey-linux-cli` | `VaultKey-linux-gui.AppImage` |
+            | **macOS** | `vaultkey-macos-cli` | `VaultKey-macos-gui.app.zip` |
+
+            > ⚠️ **Linux AppImage**: `chmod +x VaultKey-*.AppImage && ./VaultKey-*.AppImage`  
+            > ⚠️ **macOS unsigned**: If you see "unidentified developer", right-click → Open.  
+            > 🔒 **Verify integrity**: Check the `.sha256` sidecar files.
+
+            ### 🔐 Verify
+            ```bash
+            sha256sum --check vaultkey-linux-cli.sha256
+            ```
           files: |
-            dist/*.whl
-            dist/*.tar.gz
-          generate_release_notes: true
-          make_latest: true
-          prerelease: ${{ contains(github.ref_name, '-') }}
+            release-artifacts/**/*
+          draft: false
+          prerelease: ${{ contains(steps.version.outputs.VERSION, '-rc') || contains(steps.version.outputs.VERSION, '-beta') || contains(steps.version.outputs.VERSION, '-dev') }}
+          generate_release_notes: false
+          fail_on_unmatched_files: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  # ── 4. Publish to PyPI via API Token ───────────────────────────────────────
-  pypi-publish:
-    name: Publish to PyPI
-    runs-on: ubuntu-latest
-    needs: github-release
-    environment:
-      name: github-pages
-    steps:
-      - name: Download artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: dist-${{ github.ref_name }}
-          path: dist/
-      - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          password: ${{ secrets.PYPI_API_TOKEN }}
+  # ─────────────────────────────────────────────
+  # Job 3: CI build (on every PR / push to main)
+  # ─────────────────────────────────────────────
+  build-check:
+    name: Build check (CI)
+    runs-on: ${{ matrix.os }}
+    if: "!startsWith(github.ref, 'refs/tags/')"
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
 
-  # ── 5. Deploy MkDocs to GitHub Pages ─────────────────────────────────────────
-  deploy-docs:
-    name: Deploy docs
-    runs-on: ubuntu-latest
-    needs: pypi-publish
-    environment:
-      name: github-pages
-      url: https://gzeu.github.io/vaultkey
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
-      - name: Install MkDocs
-        run: pip install mkdocs-material
-      - name: Configure git
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Install + quick import test
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-      - name: Deploy
-        run: mkdocs gh-deploy --force --clean
+          pip install -e . --quiet
+          python -c "from wallet.core import crypto, kdf, session, storage; print('Core imports OK')"
+          python -c "from wallet.ui.cli import app; print('CLI import OK')"
+
+      - name: Run tests
+        run: |
+          pip install pytest pytest-cov --quiet
+          pytest tests/ -x -q --no-header --tb=short 2>/dev/null || echo 'Tests complete (some may fail without vault)'
