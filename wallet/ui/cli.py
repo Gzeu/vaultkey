@@ -10,6 +10,8 @@ Wave 7: rename, expiry-check, bulk-import
 Wave 8: rotate-all, watch-expiry, completion
 Wave 9: profile, share / share-receive / share-list / share-revoke,
          webhook add / list / remove / test
+Wave 10: note, mvx, gen-password, gen-passphrase, import-external,
+          stats, export-report, search-advanced
 """
 
 import json
@@ -916,7 +918,7 @@ def export_wallet(output: str = typer.Option("backup.enc", "--output", "-o")) ->
     with console.status("[cyan]Encrypting export…[/cyan]"):
         export_params = KDFParams.generate()
         export_key = derive_key(export_pass, export_params)
-        WalletStorage(out_path).save(export_key, export_params, payload.to_dict())
+        WalletStorage(out_path, out_path.parent).save(export_key, export_params, payload.to_dict())
     audit_log("EXPORT", status="OK", extra=str(out_path))
     console.print(f"[green]✓ Exported to {out_path}[/green]")
 
@@ -936,7 +938,7 @@ def import_wallet(
         raise typer.Exit(1)
     import_pass = typer.prompt("Import file password", hide_input=True)
     with console.status("[cyan]Decrypting import…[/cyan]"):
-        import_storage = WalletStorage(src)
+        import_storage = WalletStorage(src, src.parent)
         import_params = import_storage.read_kdf_params()
         import_key = derive_key(import_pass, import_params)
         import_data = import_storage.load(import_key)
@@ -1201,6 +1203,12 @@ def gui() -> None:
     """Launch the graphical GUI (customtkinter)."""
     from wallet.ui.gui import run_gui
     run_gui()
+
+
+# ------------------------------------------------------------------ #
+# Wave 10 — activate note / mvx / gen-password / stats / search-advanced
+# ------------------------------------------------------------------ #
+from wallet.utils import cli_extensions  # noqa: F401  (registers Wave 10 sub-apps)
 
 
 if __name__ == "__main__":
